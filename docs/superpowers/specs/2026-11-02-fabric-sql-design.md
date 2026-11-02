@@ -1,6 +1,6 @@
 # Fabric SQL connector design
 
-Status: proposed for user approval. No implementation authorized by this document alone.
+Status: approved by the user on 2026-11-02, including the green Fabric logo. Implementation follows the companion plan.
 
 ## Intent and agreed decisions
 
@@ -15,8 +15,8 @@ Requests do not impersonate each downstream agent's human user. SPN is another
 authentication choice on that same source configuration. Existing InterLock agent
 credentials and source roles continue to authorize access to the source.
 
-The user selected a dedicated Fabric connector. The implementation choices below
-are recommendations, not additional user-approved requirements.
+The user selected a dedicated Fabric connector and approved this design. Builder
+choices and initial scope below are the baseline for the implementation plan.
 
 ## Approaches
 
@@ -228,7 +228,6 @@ Builder check completed: the reviewer identified the undefined write-statement
 scope; this revision proposes INSERT/UPDATE/DELETE and explicitly defers other
 mutations. No other important planning questions were identified.
 
-User approval of this design is required before implementation. After approval,
-write a separate file-by-file implementation plan with test commands and execution
-boundaries. This proposal includes writes on capable endpoints and secret-based
-SPN authentication; those are the principal scope choices for review.
+User approval was received on 2026-11-02. The companion file-by-file implementation
+plan is `docs/superpowers/plans/2026-11-02-fabric-sql-connector.md`. The initial scope
+includes writes on capable endpoints and secret-based SPN authentication.
