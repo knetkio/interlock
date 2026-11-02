@@ -1,3 +1,4 @@
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -17,10 +18,32 @@ CONFIG = dict(
 )
 
 
-def adapter():
-    services = SimpleNamespace(
-        auth=SimpleNamespace(acquire=AsyncMock(return_value=object())),
-        transport=SimpleNamespace(
+def fabric_services(source_id="fabric", *, transport=None):
+    from interlock.connections.fabric.auth import FabricToken
+    from interlock.connections.fabric.config import FabricConfig
+    from interlock.connections.fabric.credentials import (
+        FabricCredentialContext,
+        FabricCurrentSource,
+    )
+    from interlock.connections.fabric.runtime import FabricServices
+
+    context = FabricCredentialContext(
+        source_id, 1, "tenant-id", "client-id", None, "spn", "connected"
+    )
+    return FabricServices(
+        SimpleNamespace(
+            assert_current=AsyncMock(),
+            current_source=AsyncMock(
+                return_value=FabricCurrentSource(FabricConfig.from_mapping(CONFIG), context)
+            ),
+        ),
+        SimpleNamespace(
+            acquire=AsyncMock(
+                return_value=FabricToken("private-token", time.time() + 3600, context)
+            )
+        ),
+        transport
+        or SimpleNamespace(
             execute=AsyncMock(
                 return_value={
                     "rows": [{"one": 1}],
@@ -31,6 +54,10 @@ def adapter():
             )
         ),
     )
+
+
+def adapter():
+    services = fabric_services()
     return get_adapter("fabric_sql", fabric_services=services, source_id="fabric"), services
 
 

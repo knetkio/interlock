@@ -13,6 +13,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
+from asyncpg import Connection
 from cryptography.fernet import Fernet, InvalidToken
 
 from interlock.connections.fabric.config import FabricConfig, require_secret_reference
@@ -69,6 +70,15 @@ class FabricCredentialContext:
     account_id: str | None
     auth_mode: Literal["oauth", "spn"]
     status: str
+    incarnation: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class FabricCurrentSource:
+    """Authoritative, non-secret source identity for delivery/publish boundaries."""
+
+    config: FabricConfig
+    context: FabricCredentialContext
 
 
 @dataclass(slots=True)
@@ -84,7 +94,14 @@ class LockedFabricCredential:
 
 def _context(row: Any) -> FabricCredentialContext:
     return FabricCredentialContext(
-        **{name: row[name] for name in FabricCredentialContext.__dataclass_fields__}
+        source_id=row["source_id"],
+        generation=row["generation"],
+        tenant_id=row["tenant_id"],
+        client_id=row["client_id"],
+        account_id=row["account_id"],
+        auth_mode=row["auth_mode"],
+        status=row["status"],
+        incarnation=str(row["incarnation"]),
     )
 
 
@@ -110,17 +127,30 @@ class FabricCredentialStore:
         self._lock_timeout_seconds = lock_timeout_seconds
 
     @asynccontextmanager
-    async def _locked_row(self, source_id: str) -> AsyncIterator[tuple[Any, Any, FabricConfig]]:
+    async def _locked_row(
+        self, source_id: str, *, require_enabled: bool = True
+    ) -> AsyncIterator[tuple[Any, Any, FabricConfig]]:
         """Lock lifecycle metadata without requiring the cache to be readable."""
         async with asyncio.timeout(self._lock_timeout_seconds):
             async with self._pool.acquire() as conn:
                 async with conn.transaction():
                     source = await conn.fetchrow(
-                        "SELECT connection_config FROM data_sources WHERE source_id = $1 FOR SHARE",
+                        "SELECT connection_config, enabled, source_type, metadata "
+                        "FROM data_sources WHERE source_id = $1 FOR SHARE",
                         source_id,
                     )
                     if source is None:
                         raise FabricCredentialError("Fabric source does not exist")
+                    if require_enabled and not source["enabled"]:
+                        raise FabricCredentialError("Fabric source is disabled")
+                    metadata = source["metadata"] or {}
+                    if isinstance(metadata, str):
+                        metadata = json.loads(metadata)
+                    if (
+                        source["source_type"] not in ("database", "fabric_sql")
+                        or metadata.get("connector_key", "fabric_sql") != "fabric_sql"
+                    ):
+                        raise FabricCredentialError("Fabric source configuration changed")
                     config = source["connection_config"]
                     if isinstance(config, str):
                         config = json.loads(config)
@@ -168,8 +198,38 @@ class FabricCredentialStore:
         return locked._connection
 
     async def get_context(self, source_id: str) -> FabricCredentialContext:
-        async with self.locked(source_id) as locked:
-            return locked.context
+        return (await self.current_source(source_id)).context
+
+    async def current_source(self, source_id: str) -> FabricCurrentSource:
+        """Read enabled/config/identity under the source lock, without decrypting tokens.
+
+        A missing, disabled or changed connector fails closed even when the
+        caller's process registry and all cache notifications are stale.
+        """
+        async with self._locked_row(source_id) as (_conn, row, config):
+            return FabricCurrentSource(config, _context(row))
+
+    @asynccontextmanager
+    async def guard_current(
+        self, context: FabricCredentialContext, config: FabricConfig
+    ) -> AsyncIterator[Connection]:
+        """Hold current identity across a short control-DB publication transaction.
+
+        Use the yielded connection for publication. Never hold this guard while
+        authenticating or collecting backend SQL; those operations use their
+        own bounded execution and an assertion at the next delivery boundary.
+        """
+        async with self._locked_row(context.source_id) as (conn, row, current_config):
+            if _context(row) != context or current_config != config:
+                raise FabricCredentialError("Fabric source configuration or identity changed")
+            if context.status != "connected":
+                raise FabricCredentialError("Fabric source requires reconnecting")
+            yield conn
+
+    async def assert_current(self, context: FabricCredentialContext, config: FabricConfig) -> None:
+        """Validate an earlier identity at a delivery or SQL submission boundary."""
+        async with self.guard_current(context, config):
+            pass
 
     async def save_cache(self, locked: LockedFabricCredential, serialized_cache: str) -> None:
         conn = self._check_lock(locked)
@@ -218,7 +278,7 @@ class FabricCredentialStore:
     async def invalidate(
         self, source_id: str, *, reason: str, delete_cache: bool
     ) -> FabricCredentialContext:
-        async with self._locked_row(source_id) as (conn, current, _cfg):
+        async with self._locked_row(source_id, require_enabled=False) as (conn, current, _cfg):
             row = await self._invalidate_row(
                 conn, _context(current), current["revision"], reason, delete_cache
             )
@@ -269,9 +329,10 @@ class FabricCredentialStore:
         expected_generation: int,
         *,
         state: str | None = None,
+        expected_incarnation: str | None = None,
     ) -> str:
         if not session_binding or any(
-            k in flow for k in ("_fabric_source_id", "_fabric_generation")
+            k in flow for k in ("_fabric_source_id", "_fabric_generation", "_fabric_incarnation")
         ):
             raise FabricCredentialError("invalid pending OAuth ownership")
         now = datetime.now(UTC)
@@ -282,8 +343,11 @@ class FabricCredentialStore:
         elif not re.fullmatch(r"[A-Za-z0-9_-]{43,128}", state):
             raise FabricCredentialError("OAuth state must be a high-entropy opaque handle")
         async with self.locked(source_id) as locked:
-            if locked.context.generation != expected_generation:
-                raise FabricCredentialError("credential generation changed")
+            if locked.context.generation != expected_generation or (
+                expected_incarnation is not None
+                and locked.context.incarnation != expected_incarnation
+            ):
+                raise FabricCredentialError("credential generation or incarnation changed")
             ciphertext = self._keyring.encrypt(
                 json.dumps(flow), source_id=source_id, purpose="pending"
             )
@@ -338,6 +402,7 @@ class FabricCredentialStore:
                     )
                     flow["_fabric_source_id"] = source_id
                     flow["_fabric_generation"] = locked.context.generation
+                    flow["_fabric_incarnation"] = locked.context.incarnation
             if invalid:
                 raise FabricCredentialError("OAuth state expired or credential generation changed")
             return flow

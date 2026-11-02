@@ -1,9 +1,12 @@
 import subprocess
 import sys
+from dataclasses import asdict
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+
+from tests.unit.test_fabric_adapter import fabric_services
 
 
 def test_absent_settings_do_not_load_optional_drivers():
@@ -51,10 +54,7 @@ async def test_registered_health_probe_uses_process_service_and_saved_source():
         metadata={"connector_key": "fabric_sql"},
         connection_config=CONFIG,
     )
-    services = SimpleNamespace(
-        auth=SimpleNamespace(acquire=AsyncMock(return_value=object())),
-        transport=SimpleNamespace(execute=AsyncMock(return_value={"rows": [{"one": 1}]})),
-    )
+    services = fabric_services("saved")
     manager = ConnectionManager(
         SimpleNamespace(get=lambda source_id: source), fabric_services=services
     )
@@ -74,8 +74,8 @@ async def test_approval_routes_database_source_through_fabric_identity_without_r
         metadata={"connector_key": "fabric_sql"},
         connection_config=CONFIG,
     )
-    services = SimpleNamespace(
-        auth=SimpleNamespace(acquire=AsyncMock(return_value=object())),
+    services = fabric_services(
+        "saved",
         transport=SimpleNamespace(execute=AsyncMock(side_effect=RuntimeError("uncertain write"))),
     )
     queue = ApprovalQueue(object(), fabric_services=services)
@@ -84,7 +84,10 @@ async def test_approval_routes_database_source_through_fabric_identity_without_r
         source_id="saved",
         identity_id=3,
         sql_text="UPDATE dbo.Users SET Name=?",
-        request_metadata={"parameters": ["name"]},
+        request_metadata={
+            "parameters": ["name"],
+            "upstream_identity": asdict(services.auth.acquire.return_value.context),
+        },
     )
     with pytest.raises(RuntimeError, match="uncertain"):
         await queue._execute_via_adapter(row, source, "database")
@@ -122,19 +125,7 @@ def test_mcp_routes_saved_fabric_identity_and_refuses_unsupported_sql_before_exe
         metadata={"connector_key": "fabric_sql"},
     )
     registry = SimpleNamespace(get=lambda source_id: source if source_id == "saved" else None)
-    services = SimpleNamespace(
-        auth=SimpleNamespace(acquire=AsyncMock(return_value=object())),
-        transport=SimpleNamespace(
-            execute=AsyncMock(
-                return_value={
-                    "rows": [{"one": 1}],
-                    "columns": ["one"],
-                    "row_count": 1,
-                    "permission_request": None,
-                }
-            )
-        ),
-    )
+    services = fabric_services("saved")
     app = _make_app(MCPAdapter(pg_pool=object(), registry=registry))
     app.state.fabric_services = services
     with TestClient(app) as client:

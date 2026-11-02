@@ -18,7 +18,7 @@ from interlock.core.sql_governance import naming_for
 from interlock.models import HealthStatus, PermissionRequest
 
 if TYPE_CHECKING:
-    from interlock.connections.fabric.runtime import FabricServices
+    from interlock.connections.fabric.runtime import FabricAuthenticatedSource, FabricServices
 
 
 class FabricSQLAdapter(BaseConnectorAdapter):
@@ -165,7 +165,19 @@ class FabricSQLAdapter(BaseConnectorAdapter):
             statement, source_id=source_id, identity_id=identity_id, metadata=metadata
         )
 
-    async def _execute(self, request: dict[str, Any], *, write: bool) -> dict[str, Any]:
+    async def execute_prepared(
+        self, request: dict[str, Any], source: FabricAuthenticatedSource, *, write: bool
+    ) -> dict[str, Any]:
+        """Internal typed handoff; agent request dictionaries cannot supply credentials."""
+        return await self._execute(request, write=write, authenticated=source)
+
+    async def _execute(
+        self,
+        request: dict[str, Any],
+        *,
+        write: bool,
+        authenticated: FabricAuthenticatedSource | None = None,
+    ) -> dict[str, Any]:
         try:
             config = FabricConfig.from_mapping(request.get("connection_config") or {})
         except ValidationError:
@@ -189,17 +201,27 @@ class FabricSQLAdapter(BaseConnectorAdapter):
             identity_id=request.get("identity_id"),
             metadata={},
         )
-        token = await services.auth.acquire(self.source_id or "", config)
+        if authenticated is None:
+            authenticated = await services.prepare_source(self.source_id or "", config)
+        if (
+            authenticated.token.context.source_id != self.source_id
+            or authenticated.config != config
+        ):
+            raise ValueError("Fabric prepared source does not match its saved identity")
+        await services.assert_current(authenticated)
         # The SQL itself stays untouched. Normalized names are exclusively for
         # enforcement; the one transport owner measures the entire envelope.
-        return await services.transport.execute(
+        result = await services.transport.execute(
             config,
-            token,
+            authenticated.token,
             query,
             tuple(parameters),
             write=write,
             permission_request=permission.model_dump(),
         )
+        if not write:
+            await services.assert_current(authenticated)
+        return result
 
     async def execute_read(self, request: dict[str, Any]) -> dict[str, Any]:
         return await self._execute(request, write=False)

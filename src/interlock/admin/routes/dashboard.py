@@ -31,7 +31,7 @@ from interlock.admin.policy_summary import (
 )
 from interlock.admin.policy_summary import as_dict as as_policy_dict
 from interlock.admin.roles import is_console_admin, is_read_only
-from interlock.admin.source_cache import invalidate_source_cache
+from interlock.admin.source_cache import invalidate_source_cache, notify_source_change
 from interlock.admin.source_ids import (
     InvalidSourceIdError,
     generate_source_id,
@@ -5271,8 +5271,7 @@ async def update_data_source_page(source_id: str, request: Request) -> Response:
         cache_strategy,
         enabled,
     )
-    async with pool.acquire() as conn:
-        await conn.execute("NOTIFY onyx_config_changed")
+    await notify_source_change(request)
     await invalidate_source_cache(request, source_id)
     await after_source_saved(request, source_id)
     await audit_admin_action(
@@ -5509,8 +5508,7 @@ async def toggle_data_source_enabled(source_id: str, request: Request) -> Respon
         """,
         source_id,
     )
-    async with pool.acquire() as conn:
-        await conn.execute("NOTIFY onyx_config_changed")
+    await notify_source_change(request)
     await invalidate_source_cache(request, source_id)
     await after_source_saved(request, source_id)
     await audit_admin_action(
@@ -5574,8 +5572,7 @@ async def delete_data_source_from_dashboard(source_id: str, request: Request) ->
     if before_row is None:
         return _mutation_redirect(request, "/dashboard/data-sources")
     await pool.execute("DELETE FROM data_sources WHERE source_id = $1", source_id)
-    async with pool.acquire() as conn:
-        await conn.execute("NOTIFY onyx_config_changed")
+    await notify_source_change(request)
     await invalidate_source_cache(request, source_id)
     await audit_admin_action(
         request,

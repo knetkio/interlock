@@ -97,11 +97,22 @@ class MemoryStore:
             return await self.invalidate_locked(locked, **kwargs)
 
     async def save_pending(
-        self, source_id, session_binding, flow, expires_at, expected_generation, *, state=None
+        self,
+        source_id,
+        session_binding,
+        flow,
+        expires_at,
+        expected_generation,
+        *,
+        state=None,
+        expected_incarnation=None,
     ):
         assert datetime.now(UTC) < expires_at
         async with self.locked(source_id) as locked:
-            if locked.context.generation != expected_generation:
+            if locked.context.generation != expected_generation or (
+                expected_incarnation is not None
+                and locked.context.incarnation != expected_incarnation
+            ):
                 raise FabricCredentialError("generation changed")
             handle = state or f"opaque-{len(self.pending)}"
             self.pending[handle] = (
@@ -119,7 +130,11 @@ class MemoryStore:
             _, flow, generation = self.pending.pop(state)
             if generation != self.context.generation:
                 raise FabricCredentialError("generation changed")
-            return flow | {"_fabric_source_id": "one", "_fabric_generation": generation}
+            return flow | {
+                "_fabric_source_id": "one",
+                "_fabric_generation": generation,
+                "_fabric_incarnation": self.context.incarnation,
+            }
 
 
 @pytest.fixture
@@ -201,7 +216,13 @@ def setup_auth(monkeypatch):
 
         def acquire_token_by_auth_code_flow(self, flow, query):
             assert not any(
-                k in flow for k in ("_fabric_source_id", "_fabric_generation", "_fabric_binding")
+                k in flow
+                for k in (
+                    "_fabric_source_id",
+                    "_fabric_generation",
+                    "_fabric_incarnation",
+                    "_fabric_binding",
+                )
             )
             assert flow["state"] == query["state"]
             assert flow["code_verifier"] == "pkce-private-verifier"

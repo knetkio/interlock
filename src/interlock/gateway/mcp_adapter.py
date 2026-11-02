@@ -31,6 +31,7 @@ from starlette.routing import Route
 from interlock import release_version
 from interlock.cache.provenance import redaction_of, with_redaction
 from interlock.connections.connectors import get_adapter
+from interlock.connections.fabric.runtime import FabricAuthenticatedSource
 from interlock.core.normalizer import (
     DEFAULT_DIALECT,
     compute_cache_key,
@@ -802,6 +803,13 @@ class MCPAdapter:
                 tables = describable
                 request.state.describable_tables = describable
 
+        upstream_identity = None
+        if tool_name == "agentgate_query" and saved_connector_key == "fabric_sql":
+            try:
+                upstream_identity = await self._fabric_identity_binding(request, saved_source)
+            except Exception as exc:
+                return _tool_failure_response(exc, _call_correlation_id(request))
+
         gateway_request = GatewayRequest(
             protocol="mcp",
             source_id=str(arguments["source_id"]),
@@ -816,6 +824,7 @@ class MCPAdapter:
                 "tool_name": tool_name,
                 "correlation_id": _call_correlation_id(request),
                 "connector_key": saved_connector_key,
+                **({"upstream_identity": upstream_identity} if upstream_identity else {}),
             },
             tables=tables,
             dialect=self._dialect_for_source(request, str(arguments["source_id"])),
@@ -920,22 +929,7 @@ class MCPAdapter:
                 _text_content("Cache consistency barrier unavailable"),
                 status_code=503,
             )
-        if nq is not None and not is_multi_statement:
-            fingerprint = compute_cache_key(
-                protocol="mcp",
-                source_id=source_id,
-                normalized_sql=nq.normalized_sql or sql,
-                parameters=getattr(nq, "parameters", None),
-                identity_role=role_context,
-                mapped_pg_role=getattr(identity, "mapped_pg_role", None),
-                tenant_id=getattr(identity, "team", None),
-                grants_version=_grants_version(identity),
-                policy_scope_hash=_decision_scope_hash(
-                    getattr(request.state, "gateway_decision", None)
-                ),
-                source_generation=source_generation,
-            )
-            operation = nq.operation
+        operation = nq.operation if nq is not None and not is_multi_statement else None
 
         # 3. Operation type was already governed by GatewayPipeline.call_tool
         op_type = (
@@ -993,6 +987,40 @@ class MCPAdapter:
                 DataSourceNotFoundError(f"Unknown data source: {source_id}")
             )
 
+        source_config = live_registry.get(source_id) if live_registry is not None else None
+        fabric_source: FabricAuthenticatedSource | None = None
+        if source_config is not None and source_config.connector_key == "fabric_sql":
+            try:
+                from interlock.connections.fabric.config import FabricConfig
+
+                services = getattr(state, "fabric_services", None)
+                if services is None:
+                    raise DataSourceUnavailableError(
+                        "Fabric authentication services are unavailable"
+                    )
+                fabric_source = await services.prepare_source(
+                    source_id, FabricConfig.from_mapping(source_config.connection_config)
+                )
+            except Exception as exc:
+                return _tool_failure_response(exc, _call_correlation_id(request))
+
+        if nq is not None and not is_multi_statement:
+            fingerprint = compute_cache_key(
+                protocol="mcp",
+                source_id=source_id,
+                normalized_sql=nq.normalized_sql or sql,
+                parameters=getattr(nq, "parameters", None),
+                identity_role=role_context,
+                mapped_pg_role=getattr(identity, "mapped_pg_role", None),
+                tenant_id=getattr(identity, "team", None),
+                grants_version=_grants_version(identity),
+                policy_scope_hash=_decision_scope_hash(
+                    getattr(request.state, "gateway_decision", None)
+                ),
+                source_generation=source_generation,
+                upstream_identity_scope=fabric_source.cache_scope if fabric_source else None,
+            )
+
         # Resolve the strategy this *source* is configured to use, not the
         # gateway-wide default. A source set to `bypass` must not be served
         # from cache.
@@ -1009,6 +1037,11 @@ class MCPAdapter:
                     )
                     result = CacheResult(hit=False)
                 if result.hit and result.data is not None:
+                    if fabric_source is not None:
+                        try:
+                            await fabric_source.assert_current()
+                        except Exception as exc:
+                            return _tool_failure_response(exc, _call_correlation_id(request))
                     cache_tier = result.tier
                     # The cached JSON was redacted when stored; record that
                     # redaction, since no scanner runs on a hit.
@@ -1033,7 +1066,15 @@ class MCPAdapter:
                             pii_detected=cached_pii,
                             pii_types=cached_pii_types,
                             redaction_stats=cached_stats,
+                            upstream_identity=(
+                                fabric_source.upstream_identity if fabric_source else None
+                            ),
                         )
+                    if fabric_source is not None:
+                        try:
+                            await fabric_source.assert_current()
+                        except Exception as exc:
+                            return _tool_failure_response(exc, _call_correlation_id(request))
                     return JSONResponse(
                         _text_content(result.data.decode("utf-8")),
                     )
@@ -1060,7 +1101,19 @@ class MCPAdapter:
                     "parameters": args.get("parameters") or (),
                     "connection_config": source_config.connection_config,
                 }
-                if op_type == "write":
+                if fabric_source is not None:
+                    from interlock.connections.fabric.adapter import FabricSQLAdapter
+
+                    assert isinstance(adapter, FabricSQLAdapter)
+                    connector_result = await adapter.execute_prepared(
+                        connector_request, fabric_source, write=op_type == "write"
+                    )
+                    rows_dicts = (
+                        [connector_result]
+                        if op_type == "write"
+                        else [dict(row) for row in connector_result.get("rows", [])]
+                    )
+                elif op_type == "write":
                     connector_result = await adapter.execute_write(connector_request)
                     rows_dicts = [connector_result]
                 else:
@@ -1161,6 +1214,12 @@ class MCPAdapter:
                         exc_info=True,
                     )
 
+        if fabric_source is not None and op_type == "read":
+            try:
+                await fabric_source.assert_current()
+            except Exception as exc:
+                return _tool_failure_response(exc, _call_correlation_id(request))
+
         # 7. Cache write ------------------------------------------------
         if op_type == "read" and fingerprint is not None and cache_strategy is not None:
             try:
@@ -1168,7 +1227,16 @@ class MCPAdapter:
                     fingerprint,
                     payload.encode("utf-8"),
                     with_redaction(
-                        {"source_id": source_id, "protocol": "mcp", "tables": tables},
+                        {
+                            "source_id": source_id,
+                            "protocol": "mcp",
+                            "tables": tables,
+                            **(
+                                {"upstream_identity": fabric_source.upstream_identity}
+                                if fabric_source
+                                else {}
+                            ),
+                        },
                         pii_detected=pii_detected,
                         pii_types=pii_types,
                         redaction_stats=redaction_stats,
@@ -1209,9 +1277,24 @@ class MCPAdapter:
                 pii_types=pii_types,
                 redaction_stats=redaction_stats,
                 row_count=len(rows_dicts),
+                upstream_identity=(fabric_source.upstream_identity if fabric_source else None),
             )
 
+        if fabric_source is not None and op_type == "read":
+            try:
+                await fabric_source.assert_current()
+            except Exception as exc:
+                return _tool_failure_response(exc, _call_correlation_id(request))
         return JSONResponse(_text_content(payload))
+
+    async def _fabric_identity_binding(self, request: Request, source: Any) -> dict[str, Any]:
+        from dataclasses import asdict
+
+        services = getattr(request.app.state, "fabric_services", None)
+        if services is None:
+            raise DataSourceUnavailableError("Fabric authentication services are unavailable")
+        current = await services.store.current_source(source.source_id)
+        return asdict(current.context)
 
     def _cache_strategy_for(self, request: Request, source_id: str | None) -> Any | None:
         """The cache strategy the given source is configured to use.
@@ -1334,6 +1417,7 @@ class MCPAdapter:
                 tables=fields.get("tables"),
                 metadata={
                     "row_count": fields.get("row_count"),
+                    "upstream_identity": fields.get("upstream_identity"),
                     "tool_name": fields.get("path"),
                     "redaction_stats": fields.get("redaction_stats") or None,
                     **(

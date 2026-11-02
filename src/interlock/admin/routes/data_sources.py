@@ -15,7 +15,7 @@ from interlock.admin.audit import (
     summarize_admin_resource,
 )
 from interlock.admin.catalog_hooks import after_source_saved
-from interlock.admin.source_cache import invalidate_source_cache
+from interlock.admin.source_cache import invalidate_source_cache, notify_source_change
 from interlock.admin.source_ids import (
     InvalidSourceIdError,
     generate_source_id,
@@ -100,9 +100,7 @@ def _row_to_dict(row) -> dict[str, Any]:  # asyncpg.Record
 
 
 async def _notify(request: Request, channel: str = "onyx_config_changed") -> None:
-    pool = request.app.state.pg_pool
-    async with pool.acquire() as conn:
-        await conn.execute(f"NOTIFY {channel}")
+    await notify_source_change(request, channel)
 
 
 # ---------------------------------------------------------------------------

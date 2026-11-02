@@ -178,6 +178,7 @@ def compute_cache_key(
     grants_version: str | None = None,
     policy_scope_hash: str | None = None,
     source_generation: int | None = None,
+    upstream_identity_scope: str | None = None,
 ) -> str:
     """Identity-aware cache key.
 
@@ -220,6 +221,10 @@ def compute_cache_key(
             policy_scope_hash or "",
         )
     )
+    if upstream_identity_scope is not None:
+        # Existing connectors retain v6 byte-for-byte. Fabric binds every tier
+        # to its authoritative saved principal/config and credential incarnation.
+        payload = sep.join(("v7", payload, upstream_identity_scope))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 

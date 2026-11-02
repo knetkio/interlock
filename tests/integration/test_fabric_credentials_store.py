@@ -56,8 +56,8 @@ async def store_db(pg_pool, monkeypatch):
             migrations = Path(__file__).resolve().parents[2] / "migrations"
             first = await apply_migrations(conn, migrations, baseline_existing=False)
             second = await apply_migrations(conn, migrations, baseline_existing=False)
-            assert first.applied[-1] == "020_fabric_credentials.sql"
-            assert second.applied == [] and len(second.skipped) == 20
+            assert first.applied[-1] == "021_fabric_source_lifecycle.sql"
+            assert second.applied == [] and len(second.skipped) == 21
         await pool.execute(
             "INSERT INTO data_sources (source_id,name,source_type,connection_config) VALUES ('one','Fabric','database',$1)",
             json.dumps(BASE),
@@ -114,6 +114,9 @@ async def test_pending_is_encrypted_session_bound_single_use_and_returns_bound_c
         "token": "secret-token",
         "_fabric_source_id": "one",
         "_fabric_generation": 1,
+        "_fabric_incarnation": str(
+            await pool.fetchval("SELECT incarnation FROM fabric_credentials WHERE source_id='one'")
+        ),
     }
     with pytest.raises(FabricCredentialError):
         await store.consume_pending(state, "session")
@@ -282,14 +285,17 @@ async def test_state_with_obsolete_generation_is_deleted(store_db):
     assert await pool.fetchval("SELECT count(*) FROM fabric_pending_oauth") == 0
 
 
-async def test_reserved_flow_metadata_cannot_override_source_binding(store_db):
+@pytest.mark.parametrize(
+    "reserved", ["_fabric_source_id", "_fabric_generation", "_fabric_incarnation"]
+)
+async def test_reserved_flow_metadata_cannot_override_source_binding(store_db, reserved):
     store, _, _ = store_db
     await store.get_context("one")
     with pytest.raises(FabricCredentialError):
         await store.save_pending(
             "one",
             "session",
-            {"_fabric_source_id": "another-source"},
+            {reserved: "another-source"},
             datetime.now(UTC) + timedelta(seconds=599),
             1,
         )

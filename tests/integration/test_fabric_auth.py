@@ -233,3 +233,53 @@ async def test_unreadable_ciphertext_is_sanitized_and_metadata_disconnect_can_re
     assert error.value.__suppress_context__
     context = await store.invalidate("one", reason="disconnect", delete_cache=True)
     assert context.status == "disconnected"
+
+
+async def test_consumed_callback_cannot_attach_to_recreated_source_with_same_generation(
+    store_db, setup_auth, monkeypatch
+):
+    store, pool, _ = store_db
+    _, _, calls, settings = setup_auth
+    auth = FabricAuth(store, settings)
+    url = await auth.begin_oauth("one", "admin-session")
+    state = parse_qs(urlsplit(url).query)["state"][0]
+    original = store.consume_pending
+
+    async def consume_then_recreate(*args):
+        flow = await original(*args)
+        await pool.execute("DELETE FROM data_sources WHERE source_id='one'")
+        await pool.execute(
+            "INSERT INTO data_sources (source_id,name,source_type,connection_config) VALUES ('one','Replacement','database',$1)",
+            json.dumps(BASE),
+        )
+        return flow
+
+    monkeypatch.setattr(store, "consume_pending", consume_then_recreate)
+    with pytest.raises(FabricAuthError) as error:
+        await auth.complete_oauth(state, {"state": state, "code": "code"}, "admin-session")
+    assert error.value.code == "reconnect_required"
+    assert not [call for call in calls if call[0] == "complete"]
+    assert (await store.get_context("one")).account_id is None
+
+
+async def test_oauth_start_cannot_save_old_flow_into_recreated_source(
+    store_db, setup_auth, monkeypatch
+):
+    store, pool, _ = store_db
+    _, _, _, settings = setup_auth
+    auth = FabricAuth(store, settings)
+    original = store.save_pending
+
+    async def recreate_then_save(*args, **kwargs):
+        await pool.execute("DELETE FROM data_sources WHERE source_id='one'")
+        await pool.execute(
+            "INSERT INTO data_sources (source_id,name,source_type,connection_config) VALUES ('one','Replacement','database',$1)",
+            json.dumps(BASE),
+        )
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(store, "save_pending", recreate_then_save)
+    with pytest.raises(FabricAuthError) as error:
+        await auth.begin_oauth("one", "admin-session")
+    assert error.value.code == "reconnect_required"
+    assert await pool.fetchval("SELECT count(*) FROM fabric_pending_oauth") == 0

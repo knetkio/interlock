@@ -360,6 +360,7 @@ class FabricAuth:
                 config = locked.config
                 self._validate_oauth(config)
                 generation = locked.context.generation
+                incarnation = locked.context.incarnation
                 flow = await asyncio.to_thread(self._begin_sync, config, state)
             handle = await self._store.save_pending(
                 source_id,
@@ -368,6 +369,7 @@ class FabricAuth:
                 datetime.now(UTC) + timedelta(seconds=599),
                 generation,
                 state=state,
+                expected_incarnation=incarnation,
             )
             if handle != state:
                 raise FabricAuthError("authentication_unavailable")
@@ -426,11 +428,20 @@ class FabricAuth:
             flow = await self._store.consume_pending(state, session_binding)
             source_id = flow.pop("_fabric_source_id")
             generation = flow.pop("_fabric_generation")
-            if not isinstance(source_id, str) or not isinstance(generation, int):
+            incarnation = flow.pop("_fabric_incarnation")
+            if (
+                not isinstance(source_id, str)
+                or not isinstance(generation, int)
+                or not isinstance(incarnation, str)
+            ):
                 raise FabricAuthError("authentication_denied")
             async with self._store.locked(source_id) as locked:
                 self._validate_oauth(locked.config)
-                if locked.context.generation != generation or flow.get("state") != state:
+                if (
+                    locked.context.generation != generation
+                    or locked.context.incarnation != incarnation
+                    or flow.get("state") != state
+                ):
                     raise FabricAuthError("reconnect_required")
                 account_id, serialized = await asyncio.to_thread(
                     self._complete_sync, locked.config, flow, query.copy()

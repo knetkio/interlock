@@ -411,7 +411,21 @@ class ApprovalQueue:
                 request[key] = metadata[key]
 
         try:
-            await execute_write(request)
+            from interlock.connections.fabric.adapter import FabricSQLAdapter
+            from interlock.connections.fabric.config import FabricConfig
+
+            if isinstance(adapter, FabricSQLAdapter):
+                services = self._fabric_services
+                if services is None:
+                    raise InterLockError("Fabric authentication services are unavailable")
+                config = FabricConfig.from_mapping(request["connection_config"])
+                adapter.validate_sql(row["sql_text"], database=config.database)
+                authenticated = await services.prepare_source(row["source_id"], config)
+                if metadata.get("upstream_identity") != authenticated.upstream_identity:
+                    raise InterLockError("Fabric approval identity changed; submit a new request")
+                await adapter.execute_prepared(request, authenticated, write=True)
+            else:
+                await execute_write(request)
         except NotImplementedError as exc:
             # BaseConnectorAdapter.execute_write is a stub for read-only
             # connectors. Treat it as a refusal, not a silent success.
