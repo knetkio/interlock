@@ -603,3 +603,144 @@ async def test_allowlisted_tenant_domain_uses_msals_canonical_tenant_for_saved_a
     token = await auth.acquire("one", config)
     assert token.context.tenant_id == "contoso.onmicrosoft.com"
     assert token.context.account_id == "uid.canonical-tenant-guid"
+
+
+@pytest.mark.parametrize("operation", ["malformed_response", "callback_cache", "refresh_error"])
+async def test_real_msal_logs_redact_provider_payloads_without_affecting_concurrent_callers(
+    monkeypatch, caplog, operation
+):
+    """Exercise real SDK ERROR, cache/code DEBUG, and refresh-error DEBUG logging."""
+    import hashlib
+    import logging
+
+    from interlock.connections.fabric import auth as module
+
+    secret = "fabric-log-test-client-secret"
+    token = "fabric-log-test-access-token"
+    code = "fabric-log-test-authorization-code"
+    marker = "fabric-log-test-provider-payload"
+    refresh = "fabric-log-test-refresh-token"
+    entered, release = threading.Event(), threading.Event()
+    real_client = module.msal.ConfidentialClientApplication
+    posts = []
+    oauth = operation != "malformed_response"
+    config = FabricConfig(
+        **(BASE | ({"auth_mode": "oauth", "client_secret_ref": None} if oauth else {}))
+    )
+    store = MemoryStore(config)
+    settings = FabricSettings(
+        oauth_client_id="client",
+        oauth_client_secret_ref="env://FABRIC_LOG_TEST_SECRET",
+        oauth_allowed_tenants=["tenant"],
+        oauth_redirect_uri="https://admin.example/fabric/callback",
+    )
+    monkeypatch.setenv("FABRIC_LOG_TEST_SECRET", secret)
+    monkeypatch.setenv("FABRIC_CLIENT_SECRET", secret)
+
+    class Http:
+        def get(self, url, **kwargs):
+            assert (
+                url
+                == "https://login.microsoftonline.com/tenant/v2.0/.well-known/openid-configuration"
+            )
+            return SimpleNamespace(
+                status_code=200,
+                text=json.dumps(
+                    {
+                        "authorization_endpoint": "https://login.microsoftonline.com/tenant/oauth2/v2.0/authorize",
+                        "token_endpoint": "https://login.microsoftonline.com/tenant/oauth2/v2.0/token",
+                        "issuer": "https://login.microsoftonline.com/tenant/v2.0",
+                    }
+                ),
+            )
+
+        def post(self, url, data, **kwargs):
+            assert url == "https://login.microsoftonline.com/tenant/oauth2/v2.0/token"
+            assert data["client_secret"] == secret
+            posts.append(data.copy())
+            entered.set()
+            assert release.wait(5)
+            payload = f"{marker} {token} {code} {secret} {refresh}"
+            if operation == "malformed_response":
+                text = f"truncated provider body: {payload}"
+            elif operation == "refresh_error":
+                text = json.dumps({"error": "invalid_grant", "error_description": payload})
+            else:
+                text = json.dumps(
+                    {
+                        "access_token": token,
+                        "expires_in": 3600,
+                        "token_type": "Bearer",
+                        "scope": "https://database.windows.net/.default",
+                        "provider_diagnostic": payload,
+                    }
+                )
+            return SimpleNamespace(status_code=200, headers={}, text=text)
+
+    def construct(*args, **kwargs):
+        return real_client(*args, http_client=Http(), **kwargs)
+
+    monkeypatch.setattr(module.msal, "ConfidentialClientApplication", construct)
+    auth = FabricAuth(store, settings)
+    caplog.set_level(logging.DEBUG)
+    if operation == "callback_cache":
+        url = await auth.begin_oauth("one", "admin-session")
+        state = parse_qs(urlsplit(url).query)["state"][0]
+        task = asyncio.create_task(
+            auth.complete_oauth(state, {"state": state, "code": code}, "admin-session")
+        )
+        expected = "authentication_denied"  # Token lacks a returned user identity.
+    else:
+        if operation == "refresh_error":
+            account = ACCOUNT | {
+                "environment": "login.microsoftonline.com",
+                "authority_type": "MSSTS",
+            }
+            cache = {
+                "Account": {"account": account},
+                "RefreshToken": {
+                    "refresh": {
+                        "credential_type": "RefreshToken",
+                        "secret": refresh,
+                        "home_account_id": "uid.tenant",
+                        "environment": "login.microsoftonline.com",
+                        "client_id": "client",
+                        "target": "https://database.windows.net/.default",
+                    }
+                },
+            }
+            store.context = replace(store.context, status="connected", account_id="uid.tenant")
+            store.cache = json.dumps(
+                {
+                    "version": 1,
+                    "msal": json.dumps(cache),
+                    "secret_fingerprint": hashlib.sha256(secret.encode()).hexdigest(),
+                }
+            )
+        task = asyncio.create_task(auth.acquire("one", config))
+        expected = "reconnect_required" if oauth else "authentication_unavailable"
+    try:
+        assert await asyncio.to_thread(entered.wait, 2)
+        # This is an unrelated caller on the same SDK logger during Fabric I/O.
+        logging.getLogger("msal.oauth2cli.oauth2").debug("Unrelated MSAL caller remains visible")
+    finally:
+        release.set()
+    with pytest.raises(FabricAuthError) as error:
+        await task
+    assert error.value.code == expected
+    assert "Unrelated MSAL caller remains visible" in caplog.text
+    assert len(posts) == 1
+    if operation == "callback_cache":
+        assert posts[0]["code"] == code
+        assert store.context.status == "disconnected" and not store.cache
+    elif operation == "refresh_error":
+        assert posts[0]["refresh_token"] == refresh
+        assert store.context.status == "reconnect_required"
+    else:
+        assert store.context.status == "connected" and not store.cache
+    for sensitive in (marker, token, code, secret, refresh):
+        assert sensitive not in caplog.text
+    sdk_records = [record for record in caplog.records if record.name.startswith("msal.")]
+    level = logging.ERROR if operation == "malformed_response" else logging.DEBUG
+    assert any(record.levelno == level for record in sdk_records)
+    assert all(record.exc_info is None and record.stack_info is None for record in sdk_records)

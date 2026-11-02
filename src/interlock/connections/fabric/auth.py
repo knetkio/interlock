@@ -5,9 +5,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import math
 import secrets
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
@@ -37,6 +41,53 @@ _MESSAGES: dict[AuthErrorCode, str] = {
     "authentication_unavailable": "Fabric authentication is temporarily unavailable",
     "configuration_changed": "Fabric source configuration changed; reload this source",
 }
+
+_FABRIC_MSAL_LOG_SCOPE: ContextVar[bool] = ContextVar("fabric_msal_log_scope", default=False)
+
+
+class _FabricMsalLogFilter(logging.Filter):
+    """Scrub SDK records before handlers, only inside this connector's calls.
+
+    MSAL's PII setting does not cover malformed response exception logging or
+    all cache/refresh DEBUG fields. Never format that untrusted payload here.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if _FABRIC_MSAL_LOG_SCOPE.get():
+            record.msg = "Fabric authentication provider diagnostic (sensitive details suppressed)"
+            record.args = ()
+            record.exc_info = None
+            record.exc_text = None
+            record.stack_info = None
+        return True
+
+
+# Install once, without request-time changes to global logging configuration.
+# Logger filters are not inherited by descendants: cover each SDK logger used
+# by confidential-client construction, OAuth, refresh and cache operations.
+_MSAL_LOG_FILTER = _FabricMsalLogFilter()
+for _logger_name in (
+    "msal.application",
+    "msal.authority",
+    "msal.token_cache",
+    "msal.telemetry",
+    "msal.region",
+    "msal.oauth2cli.oauth2",
+    "msal.oauth2cli.oidc",
+    "msal.oauth2cli.assertion",
+):
+    logging.getLogger(_logger_name).addFilter(_MSAL_LOG_FILTER)
+
+
+@contextmanager
+def _redacted_msal_logs() -> Iterator[None]:
+    # The decorator enters inside the worker thread, including construction and
+    # cache handling. Cancellation leaves late SDK logs scoped until it exits.
+    scope = _FABRIC_MSAL_LOG_SCOPE.set(True)
+    try:
+        yield
+    finally:
+        _FABRIC_MSAL_LOG_SCOPE.reset(scope)
 
 
 class FabricAuthError(RuntimeError):
@@ -168,6 +219,7 @@ class FabricAuth:
         except (KeyError, ValueError, TypeError, OverflowError):
             raise FabricAuthError("authentication_unavailable") from None
 
+    @_redacted_msal_logs()
     def _acquire_sync(
         self, config: FabricConfig, serialized: str, account_id: str | None
     ) -> tuple[str, float, str]:
@@ -272,6 +324,7 @@ class FabricAuth:
         except Exception:
             raise FabricAuthError("authentication_unavailable") from None
 
+    @_redacted_msal_logs()
     def _begin_sync(self, config: FabricConfig, state: str) -> dict[str, Any]:
         app, _, fingerprint = self._session(config, "")
         try:
@@ -326,6 +379,7 @@ class FabricAuth:
         except Exception:
             raise FabricAuthError("authentication_unavailable") from None
 
+    @_redacted_msal_logs()
     def _complete_sync(
         self, config: FabricConfig, flow: dict[str, Any], query: dict[str, str]
     ) -> tuple[str, str]:
