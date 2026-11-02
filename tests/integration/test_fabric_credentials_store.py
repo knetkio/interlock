@@ -311,3 +311,41 @@ async def test_rotation_reads_database_cache_then_reencrypts_with_new_version(
         await pool.fetchval("SELECT encrypted_cache FROM fabric_credentials WHERE source_id='one'")
     )
     assert ciphertext.startswith(b"v2:") and b"new-token" not in ciphertext
+
+
+@pytest.mark.parametrize("unreadable", ["corrupt_cache", "retired_version", "wrong_key"])
+async def test_disconnect_revokes_unreadable_cache_and_pending_flow(
+    store_db, monkeypatch, unreadable
+):
+    store, pool, _ = store_db
+    async with store.locked("one") as locked:
+        await store.save_identity(locked, account_id="saved-account")
+        await store.save_cache(locked, "private-refresh")
+        previous_generation = locked.context.generation
+        previous_revision = locked.revision
+    await pending(store)
+    if unreadable == "corrupt_cache":
+        await pool.execute(
+            "UPDATE fabric_credentials SET encrypted_cache=$1 WHERE source_id='one'",
+            b"v1:corrupted-cache",
+        )
+    else:
+        monkeypatch.setenv("FABRIC_REPLACEMENT_KEY", Fernet.generate_key().decode())
+        version = "v2" if unreadable == "retired_version" else "v1"
+        store = FabricCredentialStore(
+            pool, FabricKeyring(version, {version: "env://FABRIC_REPLACEMENT_KEY"})
+        )
+    with pytest.raises(FabricCredentialError):
+        async with store.locked("one"):
+            pytest.fail("an unreadable cache became accessible")
+
+    context = await store.invalidate("one", reason="disconnect", delete_cache=True)
+
+    assert context.generation == previous_generation + 1
+    assert context.status == "disconnected" and context.account_id is None
+    row = await pool.fetchrow("SELECT * FROM fabric_credentials WHERE source_id='one'")
+    assert row["revision"] == previous_revision + 1
+    assert row["encrypted_cache"] is None and row["account_id"] is None
+    assert await pool.fetchval("SELECT count(*) FROM fabric_pending_oauth") == 0
+    async with store.locked("one") as locked:
+        assert locked.decrypted_cache == ""

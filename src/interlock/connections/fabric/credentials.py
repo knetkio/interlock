@@ -109,7 +109,8 @@ class FabricCredentialStore:
         self._lock_timeout_seconds = lock_timeout_seconds
 
     @asynccontextmanager
-    async def locked(self, source_id: str) -> AsyncIterator[LockedFabricCredential]:
+    async def _locked_row(self, source_id: str) -> AsyncIterator[tuple[Any, Any]]:
+        """Lock lifecycle metadata without requiring the cache to be readable."""
         async with asyncio.timeout(self._lock_timeout_seconds):
             async with self._pool.acquire() as conn:
                 async with conn.transaction():
@@ -136,25 +137,28 @@ class FabricCredentialStore:
                         "SELECT * FROM fabric_credentials WHERE source_id = $1 FOR UPDATE",
                         source_id,
                     )
-                    cache = row["encrypted_cache"]
-                    locked = LockedFabricCredential(
-                        context=_context(row),
-                        revision=row["revision"],
-                        decrypted_cache=(
-                            self._keyring.decrypt(
-                                bytes(cache), source_id=source_id, purpose="cache"
-                            )
-                            if cache is not None
-                            else ""
-                        ),
-                        _connection=conn,
-                        _owner=self,
-                    )
-                    try:
-                        yield locked
-                    finally:
-                        locked._active = False
-                        locked.decrypted_cache = ""
+                    yield conn, row
+
+    @asynccontextmanager
+    async def locked(self, source_id: str) -> AsyncIterator[LockedFabricCredential]:
+        async with self._locked_row(source_id) as (conn, row):
+            cache = row["encrypted_cache"]
+            locked = LockedFabricCredential(
+                context=_context(row),
+                revision=row["revision"],
+                decrypted_cache=(
+                    self._keyring.decrypt(bytes(cache), source_id=source_id, purpose="cache")
+                    if cache is not None
+                    else ""
+                ),
+                _connection=conn,
+                _owner=self,
+            )
+            try:
+                yield locked
+            finally:
+                locked._active = False
+                locked.decrypted_cache = ""
 
     def _check_lock(self, locked: LockedFabricCredential) -> Any:
         if locked._owner is not self or not locked._active:
@@ -210,8 +214,8 @@ class FabricCredentialStore:
     async def invalidate(
         self, source_id: str, *, reason: str, delete_cache: bool
     ) -> FabricCredentialContext:
-        async with self.locked(source_id) as locked:
-            row = await locked._connection.fetchrow(
+        async with self._locked_row(source_id) as (conn, _row):
+            row = await conn.fetchrow(
                 """UPDATE fabric_credentials SET generation=generation+1, revision=revision+1,
                 status=$2, encrypted_cache=CASE WHEN $3 THEN NULL ELSE encrypted_cache END,
                 account_id=CASE WHEN $3 THEN NULL ELSE account_id END, updated_at=NOW()
@@ -220,9 +224,7 @@ class FabricCredentialStore:
                 "disconnected" if reason == "disconnect" else "reconnect_required",
                 delete_cache,
             )
-            await locked._connection.execute(
-                "DELETE FROM fabric_pending_oauth WHERE source_id=$1", source_id
-            )
+            await conn.execute("DELETE FROM fabric_pending_oauth WHERE source_id=$1", source_id)
             return _context(row)
 
     async def save_pending(
