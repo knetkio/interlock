@@ -673,3 +673,49 @@ async def test_blocked_native_cancellers_cannot_create_an_unbounded_cleanup_queu
         driver.release.set()
         await asyncio.gather(*active, *queued, return_exceptions=True)
         await transport.close()
+
+
+async def test_repeated_queued_cancellation_restores_all_sixteen_waiting_slots(install):
+    driver = install(block=True)
+    transport = SqlServerTransport()
+    active = [
+        asyncio.create_task(transport.execute(config(), token(), "SELECT active", (), write=False))
+        for _ in range(8)
+    ]
+    waiting = []
+    victim = None
+    try:
+        await eventually(lambda: len(driver.submissions) == 8)
+        victim = asyncio.create_task(
+            transport.execute(config(), token(), "SELECT cancelled", (), write=False)
+        )
+        await asyncio.sleep(0)  # Enter admission and wait behind the eight workers.
+        victim.cancel()
+        await asyncio.sleep(0)  # Enter queued cleanup, awaiting its cancelled acquire task.
+        victim.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await victim
+        waiting = [
+            asyncio.create_task(
+                transport.execute(config(), token(), "SELECT waiting", (), write=False)
+            )
+            for _ in range(16)
+        ]
+        await asyncio.sleep(0)
+        # Every replacement must still be queued; a leaked admission rejects the sixteenth.
+        assert all(not task.done() for task in waiting)
+        with pytest.raises(SqlServerBusyError):
+            await transport.execute(config(), token(), "SELECT overflow", (), write=False)
+        assert len(driver.connections) == 8
+        driver.release.set()
+        results = await asyncio.gather(*active, *waiting)
+        assert len(results) == 24
+        assert len(driver.submissions) == 24
+        assert all(sql != "SELECT cancelled" for sql, _ in driver.submissions)
+        assert all(connection.closed for connection in driver.connections)
+    finally:
+        driver.release.set()
+        if victim is not None and not victim.done():
+            victim.cancel()
+        await asyncio.gather(*active, *waiting, return_exceptions=True)
+        await transport.close()

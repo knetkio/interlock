@@ -93,13 +93,11 @@ class SqlServerTransport:
         acquire = asyncio.create_task(self._slots.acquire())
         closing = asyncio.create_task(self._closing.wait())
         submitted = False
-        acquired = False
         try:
             await asyncio.wait((acquire, closing), return_when=asyncio.FIRST_COMPLETED)
-            if acquire.done() and not acquire.cancelled():
-                acquired = acquire.result()
             if self._closing.is_set():
                 raise SqlServerTransportError("SQL Server transport is closed")
+            acquire.result()
             operation = _Operation()
             loop = asyncio.get_running_loop()
             future = loop.run_in_executor(
@@ -138,12 +136,19 @@ class SqlServerTransport:
             if not submitted:
                 if not acquire.done():
                     acquire.cancel()
-                await asyncio.gather(acquire, return_exceptions=True)
-                if acquired or (not acquire.cancelled() and acquire.exception() is None):
-                    self._slots.release()
-                self._admitted -= 1
+                if acquire.done():
+                    self._discard_queued(acquire)
+                else:
+                    # A second caller cancellation must not interrupt resource
+                    # accounting while the semaphore processes the first one.
+                    acquire.add_done_callback(self._discard_queued)
             closing.cancel()
             await asyncio.gather(closing, return_exceptions=True)
+
+    def _discard_queued(self, acquire: asyncio.Task[bool]) -> None:
+        self._admitted -= 1
+        if not acquire.cancelled() and acquire.exception() is None and acquire.result():
+            self._slots.release()
 
     def _finished(self, future: asyncio.Future[dict[str, Any]]) -> None:
         self._running.pop(future, None)
