@@ -217,3 +217,150 @@ async def test_write_cannot_return_sensitive_output_columns_outside_write_scope(
         await target.execute_write(dict(connection_config=CONFIG, query=sql))
     services.auth.acquire.assert_not_called()
     services.transport.execute.assert_not_called()
+
+
+MIXED_DML = [
+    "INSERT INTO dbo.Target (Value) SELECT Value FROM dbo.Secret",
+    "UPDATE dbo.Target SET Value=(SELECT MAX(Value) FROM dbo.Secret) WHERE id=1",
+    "UPDATE t SET Value=s.Value FROM dbo.Target t JOIN dbo.Secret s ON t.id=s.id",
+    "UPDATE dbo.Target SET Value=s.Value FROM dbo.Secret AS s",
+    "DELETE FROM dbo.Target WHERE id IN (SELECT id FROM dbo.Secret)",
+]
+
+
+@pytest.mark.parametrize("sql", MIXED_DML)
+@pytest.mark.asyncio
+async def test_write_grant_cannot_copy_read_denied_data_through_mixed_dml(sql):
+    from interlock.core.source_roles import SourceRoleEvaluator, build_permission_request
+    from interlock.core.sql_governance import naming_for
+    from tests.unit.test_source_roles import FakePool, stmt
+
+    evaluator = SourceRoleEvaluator(
+        FakePool(
+            [
+                stmt(permission_id=1, action="db.table.insert", resource_pattern="dbo.*"),
+                stmt(permission_id=2, action="db.table.update", resource_pattern="dbo.*"),
+                stmt(permission_id=3, action="db.table.delete_rows", resource_pattern="dbo.*"),
+                stmt(
+                    permission_id=4,
+                    effect="deny",
+                    action="db.table.select",
+                    resource_pattern="dbo.Secret.*",
+                ),
+            ]
+        )
+    )
+    names = naming_for(
+        "fabric_sql",
+        {"database": "Demo"},
+        {"database": "Demo", "default_schema": "dbo", "identifier_case_sensitive": True},
+        frozenset({("dbo", "Target"), ("dbo", "Secret")}),
+    )
+
+    def permission(operation, tables):
+        return build_permission_request(
+            protocol="fabric_sql",
+            source_id="fabric",
+            identity_id=2,
+            operation=operation,
+            tables=tables,
+            naming=names,
+        )
+
+    # The real role evaluator grants ordinary writes, but explicitly denies the
+    # source read. A root-only DML action cannot represent both obligations.
+    assert (await evaluator.evaluate(permission("UPDATE", ["dbo.Target"]))).allowed
+    read = await evaluator.evaluate(permission("SELECT", ["dbo.Secret"]))
+    assert not read.allowed and read.explicit_deny
+    target, services = adapter()
+    with pytest.raises(ValueError, match="single-target"):
+        await target.execute_write(dict(connection_config=CONFIG, query=sql, identity_id=2))
+    services.auth.acquire.assert_not_called()
+    services.transport.execute.assert_not_called()
+
+
+@pytest.mark.parametrize("sql", MIXED_DML)
+def test_mcp_refuses_mixed_dml_before_preflight_or_any_origin_use(sql, monkeypatch):
+    from starlette.testclient import TestClient
+
+    from interlock.gateway.mcp_adapter import MCPAdapter
+    from interlock.gateway.pipeline import GatewayPipeline
+    from interlock.models import DataSourceConfig, DataSourceType
+    from tests.unit.test_mcp_adapter import _make_app
+
+    source = DataSourceConfig(
+        source_id="fabric",
+        name="Fabric",
+        source_type=DataSourceType.DATABASE,
+        connection_config=CONFIG,
+        metadata={"connector_key": "fabric_sql"},
+    )
+    registry = SimpleNamespace(get=lambda source_id: source)
+    _, services = adapter()
+    app = _make_app(MCPAdapter(pg_pool=object(), registry=registry))
+    app.state.fabric_services = services
+    preflight = AsyncMock(side_effect=AssertionError("Mixed DML reached preflight"))
+    monkeypatch.setattr(GatewayPipeline, "preflight", preflight)
+    with TestClient(app) as client:
+        response = client.post(
+            "/mcp/tools/call",
+            json={"name": "query", "arguments": {"source_id": "fabric", "sql": sql}},
+        )
+    assert response.status_code == 400
+    preflight.assert_not_called()
+    services.auth.acquire.assert_not_called()
+    services.transport.execute.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "WITH s AS (SELECT Value FROM dbo.Secret) UPDATE dbo.Target SET Value=1",
+        "INSERT INTO dbo.Target (Value) VALUES ((SELECT MAX(Value) FROM dbo.Secret))",
+        "UPDATE dbo.Target SET Value=1 FROM dbo.Target",
+        "DELETE t FROM dbo.Target t JOIN dbo.Secret s ON t.id=s.id",
+        "DELETE FROM dbo.Target USING dbo.Secret WHERE dbo.Target.id=dbo.Secret.id",
+    ],
+)
+@pytest.mark.asyncio
+async def test_additional_read_sources_in_dml_are_not_treated_as_target_writes(sql):
+    target, services = adapter()
+    with pytest.raises(ValueError, match="single-target"):
+        await target.execute_write(dict(connection_config=CONFIG, query=sql))
+    services.auth.acquire.assert_not_called()
+    services.transport.execute.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "sql,parameters",
+    [
+        ("INSERT INTO dbo.Target (Value) VALUES (?)", ("value",)),
+        ("INSERT INTO dbo.Target DEFAULT VALUES", ()),
+        ("UPDATE dbo.Target SET Value=? WHERE id=?", ("value", 1)),
+        ("DELETE FROM dbo.Target WHERE id=?", (1,)),
+    ],
+)
+@pytest.mark.asyncio
+async def test_single_target_parameterized_dml_reaches_transport_unchanged(sql, parameters):
+    target, services = adapter()
+    await target.execute_write(dict(connection_config=CONFIG, query=sql, parameters=parameters))
+    call = services.transport.execute.call_args
+    assert call.args[2:4] == (sql, parameters)
+    assert call.kwargs["write"] is True
+    services.transport.execute.assert_awaited_once()
+
+
+@pytest.mark.parametrize("sql", MIXED_DML)
+@pytest.mark.asyncio
+async def test_preexisting_approval_cannot_bypass_single_target_write_boundary(sql):
+    from interlock.core.approval_queue import ApprovalQueue
+    from interlock.errors import InterLockError
+
+    _, services = adapter()
+    source = SimpleNamespace(metadata={"connector_key": "fabric_sql"}, connection_config=CONFIG)
+    queue = ApprovalQueue(object(), fabric_services=services)
+    row = dict(id=1, source_id="fabric", identity_id=2, sql_text=sql, request_metadata={})
+    with pytest.raises(InterLockError, match="single-target"):
+        await queue._execute_via_adapter(row, source, "database")
+    services.auth.acquire.assert_not_called()
+    services.transport.execute.assert_not_called()

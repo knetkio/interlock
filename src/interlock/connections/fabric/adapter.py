@@ -72,6 +72,30 @@ class FabricSQLAdapter(BaseConnectorAdapter):
             node is not statement for node in statement.find_all(exp.Insert, exp.Update, exp.Delete)
         ):
             raise ValueError("Nested Fabric DML is unsupported")
+        if isinstance(statement, (exp.Insert, exp.Update, exp.Delete)):
+            # Governance carries one root DML action. It cannot also authorize
+            # reads from a SELECT/CTE/join, so those shapes must not reach the
+            # normal write-approval path, even with broad write grants.
+            target = statement.this
+            if isinstance(target, exp.Schema):
+                target = target.this
+            tables = list(statement.find_all(exp.Table))
+            has_reads = any(statement.find_all(exp.Query, exp.With, exp.From, exp.Join))
+            insert_values = not isinstance(statement, exp.Insert) or (
+                isinstance(statement.expression, exp.Values) or bool(statement.args.get("default"))
+            )
+            if (
+                not isinstance(target, exp.Table)
+                or len(tables) != 1
+                or tables[0] is not target
+                or has_reads
+                or statement.args.get("using")
+                or not insert_values
+            ):
+                raise ValueError(
+                    "Fabric writes support only single-target INSERT VALUES, UPDATE, or DELETE "
+                    "without SELECT, CTE, FROM, JOIN, or USING read sources"
+                )
         for table in statement.find_all(exp.Table):
             # Do not stringify ambiguous identifiers into a permission resource.
             parts = table.parts
