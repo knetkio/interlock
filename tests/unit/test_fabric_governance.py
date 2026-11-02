@@ -68,7 +68,7 @@ async def run_query(request, adapter, args):
     return await adapter._execute_query(request, args)
 
 
-async def call_query(request, adapter, sql):
+async def call_query(request, adapter, sql, *, parameters=None):
     """Real MCP ingress, preflight and result/cache delivery with a saved actor."""
     from starlette.requests import Request
 
@@ -77,7 +77,10 @@ async def call_query(request, adapter, sql):
         authenticate=AsyncMock(return_value=request.state.identity)
     )
     body = json.dumps(
-        {"name": "agentgate_query", "arguments": {"source_id": "saved", "sql": sql}}
+        {
+            "name": "agentgate_query",
+            "arguments": {"source_id": "saved", "sql": sql, "parameters": parameters or []},
+        }
     ).encode()
 
     async def receive():

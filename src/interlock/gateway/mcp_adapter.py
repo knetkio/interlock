@@ -922,36 +922,69 @@ class MCPAdapter:
             nq = nq[0] if nq else None
 
         fingerprint = None
-        operation = None
+        operation = nq.operation if nq is not None and not is_multi_statement else None
+        op_type = (
+            "write"
+            if (operation or "").upper()
+            in ("INSERT", "UPDATE", "DELETE", "DROP", "TRUNCATE", "ALTER", "CREATE", "EXECUTE")
+            else "read"
+        )
+
+        fabric_source: FabricAuthenticatedSource | None = None
+
+        async def fabric_failure(
+            exc: Exception, category: str, *, status_code: int | None = None
+        ) -> JSONResponse:
+            from interlock.connections.fabric.auth import FabricAuthError
+
+            correlation_id = _call_correlation_id(request)
+            if isinstance(exc, FabricAuthError):
+                category = exc.code
+            audit = getattr(state, "audit_logger", None) if state else None
+            if audit is not None:
+                await self._safe_audit(
+                    audit,
+                    identity=identity,
+                    source_id=source_id,
+                    operation=op_type,
+                    method="tools/call",
+                    path="agentgate_query",
+                    fingerprint=fingerprint,
+                    cache_hit=False,
+                    latency_ms=(time.monotonic() - t0) * 1000,
+                    status="error",
+                    error_message=category,
+                    failure_category=category,
+                    correlation_id=correlation_id,
+                    upstream_identity=(
+                        fabric_source.upstream_identity
+                        if fabric_source is not None
+                        else getattr(
+                            getattr(request.state, "gateway_decision", None),
+                            "upstream_identity",
+                            None,
+                        )
+                    ),
+                )
+            response = _tool_failure_response(exc, correlation_id)
+            body = json.loads(bytes(response.body))
+            body["correlation_id"] = correlation_id
+            return JSONResponse(body, status_code=status_code or response.status_code)
+
         try:
             source_generation = await current_cache_source_generation(
                 getattr(state, "cache_invalidator", None) if state else None,
                 source_id,
                 strict=bool(getattr(state, "cache_barrier_strict", False)) if state else False,
             )
-        except CacheBarrierUnavailableError:
+        except CacheBarrierUnavailableError as exc:
+            if getattr(getattr(request.state, "gateway_decision", None), "upstream_identity", None):
+                return await fabric_failure(exc, "fabric_cache_unavailable", status_code=503)
             return JSONResponse(
                 _text_content("Cache consistency barrier unavailable"),
                 status_code=503,
             )
-        operation = nq.operation if nq is not None and not is_multi_statement else None
-
         # 3. Operation type was already governed by GatewayPipeline.call_tool
-        op_type = (
-            "write"
-            if (operation or "").upper()
-            in (
-                "INSERT",
-                "UPDATE",
-                "DELETE",
-                "DROP",
-                "TRUNCATE",
-                "ALTER",
-                "CREATE",
-                "EXECUTE",
-            )
-            else "read"
-        )
         gateway_decision = getattr(request.state, "gateway_decision", None)
         if gateway_decision is not None and gateway_decision.write_classification is not None:
             op_type = "write"
@@ -1004,12 +1037,12 @@ class MCPAdapter:
         # exactly as `get_pool` would on a miss.
         live_registry = self._resolve_registry(request)
         if live_registry is not None and live_registry.get(source_id) is None:
-            return _tool_failure_response(
-                DataSourceNotFoundError(f"Unknown data source: {source_id}")
-            )
+            missing = DataSourceNotFoundError(f"Unknown data source: {source_id}")
+            if getattr(getattr(request.state, "gateway_decision", None), "upstream_identity", None):
+                return await fabric_failure(missing, "fabric_source_unavailable")
+            return _tool_failure_response(missing)
 
         source_config = live_registry.get(source_id) if live_registry is not None else None
-        fabric_source: FabricAuthenticatedSource | None = None
         if (
             source_config is not None
             and connector_key_for(source_config.source_type.value, source_config.metadata)
@@ -1032,7 +1065,7 @@ class MCPAdapter:
                 if governed_identity != fabric_source.upstream_identity:
                     raise ValueError("Fabric identity changed after authorization; retry request")
             except Exception as exc:
-                return _tool_failure_response(exc, _call_correlation_id(request))
+                return await fabric_failure(exc, "fabric_identity_changed")
 
         if nq is not None and not is_multi_statement:
             fingerprint = compute_cache_key(
@@ -1078,7 +1111,7 @@ class MCPAdapter:
                         try:
                             await fabric_source.assert_current()
                         except Exception as exc:
-                            return _tool_failure_response(exc, _call_correlation_id(request))
+                            return await fabric_failure(exc, "fabric_delivery_refused")
                     if fabric_source is not None:
                         cached_rows = json.loads(result.data)
                         _validate_fabric_result_columns(
@@ -1118,7 +1151,7 @@ class MCPAdapter:
                         try:
                             await fabric_source.assert_current()
                         except Exception as exc:
-                            return _tool_failure_response(exc, _call_correlation_id(request))
+                            return await fabric_failure(exc, "fabric_delivery_refused")
                     return JSONResponse(
                         _text_content(result.data.decode("utf-8")),
                     )
@@ -1190,6 +1223,8 @@ class MCPAdapter:
                     status_code=503,
                 )
         except Exception as exc:
+            if fabric_source is not None:
+                return await fabric_failure(exc, "fabric_origin_failed")
             logger.warning("MCP query error: %s", exc)
             # The agent's answer and the audit row carry the same ID; an inbound
             # X-Correlation-ID is honoured.
@@ -1272,7 +1307,7 @@ class MCPAdapter:
             try:
                 await fabric_source.assert_current()
             except Exception as exc:
-                return _tool_failure_response(exc, _call_correlation_id(request))
+                return await fabric_failure(exc, "fabric_delivery_refused")
 
         # 7. Cache write ------------------------------------------------
         if op_type == "read" and fingerprint is not None and cache_strategy is not None:
@@ -1338,7 +1373,7 @@ class MCPAdapter:
             try:
                 await fabric_source.assert_current()
             except Exception as exc:
-                return _tool_failure_response(exc, _call_correlation_id(request))
+                return await fabric_failure(exc, "fabric_delivery_refused")
         return JSONResponse(_text_content(payload))
 
     async def _fabric_identity_binding(self, request: Request, source: Any) -> dict[str, Any]:
@@ -1472,6 +1507,7 @@ class MCPAdapter:
                 metadata={
                     "row_count": fields.get("row_count"),
                     "upstream_identity": fields.get("upstream_identity"),
+                    "failure_category": fields.get("failure_category"),
                     "tool_name": fields.get("path"),
                     "redaction_stats": fields.get("redaction_stats") or None,
                     **(

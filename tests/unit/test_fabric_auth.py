@@ -521,13 +521,14 @@ def test_installed_msal_pkce_state_reserved_scopes_and_query_callback_without_ne
         http_client=Http(),
         instance_discovery=False,
     )
-    flow = app.initiate_auth_code_flow(
-        SCOPE,
-        state="opaque-operator-state",
-        redirect_uri="https://admin.example/callback",
-        response_mode="query",
-        prompt="select_account",
-    )
+    with pytest.warns(UserWarning, match="response_mode='form_post' is recommended"):
+        flow = app.initiate_auth_code_flow(
+            SCOPE,
+            state="opaque-operator-state",
+            redirect_uri="https://admin.example/callback",
+            response_mode="query",
+            prompt="select_account",
+        )
     query = parse_qs(urlsplit(flow["auth_uri"]).query)
     digest = hashlib.sha256(flow["code_verifier"].encode()).digest()
     assert query["code_challenge"] == [base64.urlsafe_b64encode(digest).rstrip(b"=").decode()]
@@ -705,7 +706,8 @@ async def test_real_msal_logs_redact_provider_payloads_without_affecting_concurr
     auth = FabricAuth(store, settings)
     caplog.set_level(logging.DEBUG)
     if operation == "callback_cache":
-        url = await auth.begin_oauth("one", "admin-session")
+        with pytest.warns(UserWarning, match="response_mode='form_post' is recommended"):
+            url = await auth.begin_oauth("one", "admin-session")
         state = parse_qs(urlsplit(url).query)["state"][0]
         task = asyncio.create_task(
             auth.complete_oauth(state, {"state": state, "code": code}, "admin-session")

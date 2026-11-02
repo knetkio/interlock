@@ -126,6 +126,28 @@ class FabricSQLAdapter(BaseConnectorAdapter):
                     "Fabric writes support only single-target INSERT VALUES, UPDATE, or DELETE "
                     "without SELECT, CTE, FROM, JOIN, or USING read sources"
                 )
+        if isinstance(statement, exp.Update):
+            # One write action cannot authorize input reads. Keep assignments
+            # limited to supplied values until separate read authorization exists.
+            for assignment in statement.expressions:
+                value = assignment.expression
+                if isinstance(value, exp.Neg) and isinstance(value.this, exp.Literal):
+                    value = value.this
+                if not isinstance(
+                    value,
+                    (
+                        exp.Literal,
+                        exp.National,
+                        exp.HexString,
+                        exp.Placeholder,
+                        exp.Null,
+                        exp.Boolean,
+                    ),
+                ):
+                    raise ValueError(
+                        "Fabric UPDATE assignments support only literals or bound parameters; "
+                        "data-derived assignment inputs require separate read authorization"
+                    )
         for table in statement.find_all(exp.Table):
             # Do not stringify ambiguous identifiers into a permission resource.
             parts = table.parts
@@ -238,7 +260,10 @@ class FabricSQLAdapter(BaseConnectorAdapter):
             or authenticated.config != config
         ):
             raise ValueError("Fabric prepared source does not match its saved identity")
-        await services.assert_current(authenticated)
+        if authenticated._services is not services:
+            from interlock.connections.fabric.auth import FabricAuthError
+
+            raise FabricAuthError("configuration_changed")
         # The SQL itself stays untouched. Normalized names are exclusively for
         # enforcement; the one transport owner measures the entire envelope.
         result = await services.transport.execute(
@@ -248,6 +273,7 @@ class FabricSQLAdapter(BaseConnectorAdapter):
             tuple(parameters),
             write=write,
             permission_request=permission.model_dump(),
+            before_submit=authenticated.assert_current,
         )
         if not write:
             await services.assert_current(authenticated)
@@ -273,8 +299,25 @@ class FabricSQLAdapter(BaseConnectorAdapter):
                 self.source_id or "<unsaved>", True, (time.monotonic() - start) * 1000, None
             )
         except Exception as exc:
+            from interlock.connections.fabric.auth import FabricAuthError
+            from interlock.connections.sqlserver import SqlServerTransportError
+
+            if isinstance(exc, SqlServerTransportError):
+                error = exc.public_message
+            elif isinstance(exc, FabricAuthError):
+                error = str(exc)
+            elif not self.source_id:
+                error = "Save the Fabric source before connecting or testing it"
+            elif self.services is None:
+                error = "Fabric authentication services are unavailable"
+            elif isinstance(exc, ValueError):
+                error = "Invalid Fabric SQL connection configuration"
+            else:
+                error = (
+                    "Fabric connection test failed; check configuration and service availability"
+                )
             return _health(
-                self.source_id or "<unsaved>", False, (time.monotonic() - start) * 1000, str(exc)
+                self.source_id or "<unsaved>", False, (time.monotonic() - start) * 1000, error
             )
 
     async def metadata_snapshot(self, *, limits: ScanLimits | None = None) -> dict[str, Any]:

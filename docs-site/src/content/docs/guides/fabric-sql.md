@@ -135,12 +135,18 @@ source roles/policies/approval. No `OUTPUT`, mixed read/write syntax (`SELECT`,
 subqueries, CTEs, `FROM`, joins, `USING`, or a second data-bearing table), `MERGE`,
 DDL, procedures, dynamic SQL, batches, or endpoint administration. Lakehouse table
 mutations are rejected before authentication/driver submission. Generic transport
-`OUTPUT` rollback tests do not enable it in the Fabric adapter.
+`OUTPUT` rollback tests do not enable it in the Fabric adapter. UPDATE assignments
+accept only literal values (including NULL and negative numeric literals) or bound
+parameters. Column-derived assignments and computed expressions are refused,
+including previously queued approvals, until input reads can be authorized
+separately from destination writes.
 
 Structured `FOR XML`/`FOR JSON`, PIVOT/UNPIVOT/APPLY, table-valued functions,
-three/four-part names, SELECT INTO, and wildcard shapes whose result lineage
-cannot be established are outside this subset. Hidden wildcard serialization
-cannot bypass column redaction. No TDS listener, PostgreSQL-to-TSQL translation,
+cross-database three-part names, four-part names, SELECT INTO, and wildcard shapes
+whose result lineage cannot be established are outside this subset. Exact same-database three-part
+qualification (for example, `Demo.dbo.Users` when the saved database is `Demo`)
+is supported; SQL sent to the driver keeps that qualification. Hidden wildcard
+serialization cannot bypass column redaction. No TDS listener, PostgreSQL-to-TSQL translation,
 VectorETL integration, or per-request delegated identity is provided.
 
 Defaults are 15-second login, 30-second statement, 1,000 rows, 8 MiB serialized

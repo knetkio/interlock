@@ -76,7 +76,9 @@ async def metadata_snapshot(
     source = await services.prepare_source(source_id, config)
 
     async def query(sql: str, params: tuple[Any, ...]) -> list[dict[str, Any]]:
-        result = await services.transport.execute(config, source.token, sql, params, write=False)
+        result = await services.transport.execute(
+            config, source.token, sql, params, write=False, before_submit=source.assert_current
+        )
         return [dict(row) for row in result["rows"]]
 
     rows = await query(_FACTS, ())

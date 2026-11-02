@@ -42,7 +42,7 @@
     <input type="hidden" name="group" value="{{ state.group|default('') }}">
 
     {% if state.connector_key == 'fabric_sql' %}
-      <p class="muted">Save the source, then connect its saved identity. Catalog discovery runs separately after setup and can be requested from the source page.</p>
+      <p class="muted">Save the source, then connect its saved identity. Catalog discovery is requested automatically after a successful connection or service principal rotation. You can request a rescan from the source page. Test Connection runs only SELECT 1.</p>
     {% elif state.source_type == 'postgresql' %}
       {% if schema_error %}
       <div class="form-error" role="alert">Could not introspect: {{ schema_error }}</div>

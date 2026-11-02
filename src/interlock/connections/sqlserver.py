@@ -14,14 +14,16 @@ import datetime as dt
 import importlib
 import json
 import math
+import re
 import struct
 import threading
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from interlock.errors import EgressBlockedError
 from interlock.security.egress import validate_host_egress
@@ -31,8 +33,32 @@ if TYPE_CHECKING:
     from interlock.connections.fabric.config import FabricConfig
 
 
+SqlServerErrorCode = Literal[
+    "execution_failed",
+    "driver_unavailable",
+    "network_unavailable",
+    "permission_denied",
+    "query_failed",
+]
+_SQL_FAILURE_MESSAGES: dict[SqlServerErrorCode, str] = {
+    "execution_failed": "SQL Server execution_failed; submitted write outcome may be unknown",
+    "driver_unavailable": "SQL Server driver_unavailable; check ODBC Driver 18 installation",
+    "network_unavailable": "SQL Server network_unavailable; check endpoint connectivity and TLS",
+    "permission_denied": "SQL Server permission_denied; check the saved principal's SQL grants",
+    "query_failed": "SQL Server query_failed; check supported SQL syntax and object names",
+}
+
+
 class SqlServerTransportError(RuntimeError):
     """Safe transport failure; a submitted write must never be automatically retried."""
+
+    def __init__(self, message: str, *, code: SqlServerErrorCode = "execution_failed") -> None:
+        self.code = code
+        super().__init__(message)
+
+    @property
+    def public_message(self) -> str:
+        return _SQL_FAILURE_MESSAGES[self.code]
 
 
 class SqlServerResultLimitError(SqlServerTransportError):
@@ -84,6 +110,7 @@ class SqlServerTransport:
         *,
         write: bool,
         permission_request: dict[str, Any] | None = None,
+        before_submit: Callable[[], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
         if self._closing.is_set():
             raise SqlServerTransportError("SQL Server transport is closed")
@@ -98,6 +125,13 @@ class SqlServerTransport:
             if self._closing.is_set():
                 raise SqlServerTransportError("SQL Server transport is closed")
             acquire.result()
+            # The prepared source owner checks current authoritative state after
+            # queueing, before any native work. It releases its DB lock before
+            # returning; no credential replacement or write retry occurs here.
+            if before_submit is not None:
+                await before_submit()
+            if self._closing.is_set():
+                raise SqlServerTransportError("SQL Server transport is closed")
             operation = _Operation()
             loop = asyncio.get_running_loop()
             future = loop.run_in_executor(
@@ -255,10 +289,25 @@ class SqlServerTransport:
             raise SqlServerTransportError("SQL endpoint egress blocked") from None
         except SqlServerTransportError:
             raise
-        except Exception:
-            raise SqlServerTransportError(
-                "SQL Server execution failed; submitted write outcome may be unknown"
-            ) from None
+        except Exception as exc:
+            # SQLSTATE and known native permission numbers select a fixed category. Never publish
+            # the remaining ODBC diagnostics (SQL, parameters, addresses, tokens).
+            state = exc.args[0] if exc.args and isinstance(exc.args[0], str) else ""
+            code: SqlServerErrorCode = "execution_failed"
+            if state in {"IM002", "IM003", "IM014"}:
+                code = "driver_unavailable"
+            elif len(state) == 5 and state.startswith("08"):
+                code = "network_unavailable"
+            elif state in {"28000", "42501"} or (
+                state == "42000"
+                and len(exc.args) > 1
+                and isinstance(exc.args[1], str)
+                and re.search(r"\((?:229|230|262|297|916)\)", exc.args[1])
+            ):
+                code = "permission_denied"
+            elif len(state) == 5 and state.startswith("42"):
+                code = "query_failed"
+            raise SqlServerTransportError(_SQL_FAILURE_MESSAGES[code], code=code) from None
         finally:
             with operation.lock:
                 operation.cursor = None

@@ -254,8 +254,4 @@ async def probe_saved(request: Request, source_id: str, config: dict[str, Any]) 
         )
     adapter = get_adapter("fabric_sql", fabric_services=services, source_id=source_id)
     status = await adapter.probe(config)
-    if not status.healthy:
-        status.error = (
-            "Fabric connection unavailable; check configuration and reconnect credentials"
-        )
     return status
