@@ -554,6 +554,9 @@ class FabricSettings(BaseModel):
     active_key_version: str | None = None
     key_refs: dict[str, str] = Field(default_factory=dict)
     oauth_redirect_uri: str | None = None
+    oauth_client_id: str | None = None
+    oauth_client_secret_ref: str | None = None
+    oauth_allowed_tenants: list[str] = Field(default_factory=list)
     lock_timeout_seconds: float = Field(default=30.0, gt=0, le=120)
     refresh_skew_seconds: int = Field(default=120, ge=0, le=600)
     max_concurrent_operations: int = Field(default=8, ge=1, le=128)
@@ -565,6 +568,8 @@ class FabricSettings(BaseModel):
 
         for ref in self.key_refs.values():
             require_secret_reference(ref)
+        if self.oauth_client_secret_ref is not None:
+            require_secret_reference(self.oauth_client_secret_ref)
         if self.active_key_version is not None and self.active_key_version not in self.key_refs:
             raise ValueError("fabric.active_key_version must name a configured secret reference")
         return self

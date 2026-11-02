@@ -9,7 +9,7 @@ import re
 import secrets
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
@@ -75,6 +75,7 @@ class FabricCredentialContext:
 class LockedFabricCredential:
     context: FabricCredentialContext
     revision: int
+    config: FabricConfig
     decrypted_cache: str = field(repr=False)
     _connection: Any = field(repr=False)
     _owner: Any = field(repr=False)
@@ -109,7 +110,7 @@ class FabricCredentialStore:
         self._lock_timeout_seconds = lock_timeout_seconds
 
     @asynccontextmanager
-    async def _locked_row(self, source_id: str) -> AsyncIterator[tuple[Any, Any]]:
+    async def _locked_row(self, source_id: str) -> AsyncIterator[tuple[Any, Any, FabricConfig]]:
         """Lock lifecycle metadata without requiring the cache to be readable."""
         async with asyncio.timeout(self._lock_timeout_seconds):
             async with self._pool.acquire() as conn:
@@ -137,15 +138,16 @@ class FabricCredentialStore:
                         "SELECT * FROM fabric_credentials WHERE source_id = $1 FOR UPDATE",
                         source_id,
                     )
-                    yield conn, row
+                    yield conn, row, cfg
 
     @asynccontextmanager
     async def locked(self, source_id: str) -> AsyncIterator[LockedFabricCredential]:
-        async with self._locked_row(source_id) as (conn, row):
+        async with self._locked_row(source_id) as (conn, row, cfg):
             cache = row["encrypted_cache"]
             locked = LockedFabricCredential(
                 context=_context(row),
                 revision=row["revision"],
+                config=cfg,
                 decrypted_cache=(
                     self._keyring.decrypt(bytes(cache), source_id=source_id, purpose="cache")
                     if cache is not None
@@ -175,8 +177,9 @@ class FabricCredentialStore:
             serialized_cache, source_id=locked.context.source_id, purpose="cache"
         )
         row = await conn.fetchrow(
-            """UPDATE fabric_credentials SET encrypted_cache=$4, revision=revision+1, updated_at=NOW()
-            WHERE source_id=$1 AND generation=$2 AND revision=$3 RETURNING revision""",
+            """UPDATE fabric_credentials SET encrypted_cache=$4, revision=revision+1,
+            status=CASE WHEN auth_mode='spn' THEN 'connected' ELSE status END, updated_at=NOW()
+            WHERE source_id=$1 AND generation=$2 AND revision=$3 RETURNING revision, status""",
             locked.context.source_id,
             locked.context.generation,
             locked.revision,
@@ -185,6 +188,7 @@ class FabricCredentialStore:
         if row is None:
             raise FabricCredentialError("credential generation or revision changed")
         locked.revision = row["revision"]
+        locked.context = replace(locked.context, status=row["status"])
         locked.decrypted_cache = serialized_cache
 
     async def save_identity(
@@ -214,18 +218,47 @@ class FabricCredentialStore:
     async def invalidate(
         self, source_id: str, *, reason: str, delete_cache: bool
     ) -> FabricCredentialContext:
-        async with self._locked_row(source_id) as (conn, _row):
-            row = await conn.fetchrow(
-                """UPDATE fabric_credentials SET generation=generation+1, revision=revision+1,
+        async with self._locked_row(source_id) as (conn, current, _cfg):
+            row = await self._invalidate_row(
+                conn, _context(current), current["revision"], reason, delete_cache
+            )
+            return _context(row)
+
+    async def _invalidate_row(
+        self,
+        conn: Any,
+        context: FabricCredentialContext,
+        revision: int,
+        reason: str,
+        delete_cache: bool,
+    ) -> Any:
+        row = await conn.fetchrow(
+            """UPDATE fabric_credentials SET generation=generation+1, revision=revision+1,
                 status=$2, encrypted_cache=CASE WHEN $3 THEN NULL ELSE encrypted_cache END,
                 account_id=CASE WHEN $3 THEN NULL ELSE account_id END, updated_at=NOW()
-                WHERE source_id=$1 RETURNING *""",
-                source_id,
-                "disconnected" if reason == "disconnect" else "reconnect_required",
-                delete_cache,
-            )
-            await conn.execute("DELETE FROM fabric_pending_oauth WHERE source_id=$1", source_id)
-            return _context(row)
+                WHERE source_id=$1 AND generation=$4 AND revision=$5 RETURNING *""",
+            context.source_id,
+            "disconnected" if reason == "disconnect" else "reconnect_required",
+            delete_cache,
+            context.generation,
+            revision,
+        )
+        if row is None:
+            raise FabricCredentialError("credential generation or revision changed")
+        await conn.execute("DELETE FROM fabric_pending_oauth WHERE source_id=$1", context.source_id)
+        return row
+
+    async def invalidate_locked(
+        self, locked: LockedFabricCredential, *, reason: str, delete_cache: bool
+    ) -> FabricCredentialContext:
+        """Revoke within an existing refresh transaction without releasing ownership."""
+        row = await self._invalidate_row(
+            self._check_lock(locked), locked.context, locked.revision, reason, delete_cache
+        )
+        locked.context, locked.revision = _context(row), row["revision"]
+        if delete_cache:
+            locked.decrypted_cache = ""
+        return locked.context
 
     async def save_pending(
         self,
@@ -234,6 +267,8 @@ class FabricCredentialStore:
         flow: dict[str, Any],
         expires_at: datetime,
         expected_generation: int,
+        *,
+        state: str | None = None,
     ) -> str:
         if not session_binding or any(
             k in flow for k in ("_fabric_source_id", "_fabric_generation")
@@ -242,7 +277,10 @@ class FabricCredentialStore:
         now = datetime.now(UTC)
         if expires_at.tzinfo is None or not now < expires_at <= now + timedelta(seconds=600):
             raise FabricCredentialError("OAuth state must expire within 600 seconds")
-        state = secrets.token_urlsafe(32)
+        if state is None:
+            state = secrets.token_urlsafe(32)
+        elif not re.fullmatch(r"[A-Za-z0-9_-]{43,128}", state):
+            raise FabricCredentialError("OAuth state must be a high-entropy opaque handle")
         async with self.locked(source_id) as locked:
             if locked.context.generation != expected_generation:
                 raise FabricCredentialError("credential generation changed")
