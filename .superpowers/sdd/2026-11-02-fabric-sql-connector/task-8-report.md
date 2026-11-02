@@ -402,3 +402,50 @@ are fresh/correlated, writes remain explicitly scoped/governed, failure does not
 retry writes, and no source/TLS/permission fallback was introduced. Remaining
 concerns are the still-unsupplied six native cells, trusted observer provenance,
 and actual deployment egress/lifecycle evidence, not unconditional skip tooling.
+
+## Review fix round 2 — protect partial network preparation with cleanup
+
+Review base: `5212ed3`; addresses the Important cleanup-boundary finding in
+`task-8-fix-1-review.md`. Only the test-only runner, its focused tests and this
+report changed. No production code, images, external/customer state or native
+acceptance results changed; six native cells remain unverified.
+
+Moved `prepare`, observer-file setup and transport-task creation inside the
+network scenario's cleanup-protected boundary. Cleanup is attempted even when
+preparation partially succeeds or observer setup fails. Operator cleanup hooks
+must tolerate partial success/no changes. A created task is cancelled if still
+running and awaited before cleanup. A cleanup failure does not replace an
+existing preparation/observer/transport error: the original error is retained
+with a sanitized note requiring manual restoration. If there is no earlier
+failure, cleanup failure still fails the scenario.
+
+Focused tests use actual subprocess prepare/cleanup scripts and filesystem
+receipts. They cover preparation failure and missing observer setup, each with
+successful cleanup and with an additional cleanup failure, checking original
+exception type/details and restoration. A separate synthetic transport coroutine
+writes a malformed observer event, then confirms it is cancelled/awaited before
+the cleanup receipt appears. These are offline tooling checks, not native proof.
+
+RED command:
+
+```sh
+uv run pytest tests/unit/test_fabric_live_scenarios.py -q
+```
+
+Before the fix: **4 failed, 11 passed**, 0.57s; each preparation/observer setup
+case failed because cleanup was not invoked (`fixround2-red.log`). The existing
+started-task cleanup regression already passed and remains retained.
+
+GREEN command: same command; **15 passed**, 0.69s (`fixround2-green.log`).
+
+Scoped lint commands:
+
+```sh
+uv run ruff check tests/integration/fabric_live_scenarios.py tests/unit/test_fabric_live_scenarios.py
+uv run black --check tests/integration/fabric_live_scenarios.py tests/unit/test_fabric_live_scenarios.py
+```
+
+Both exit 0; ruff clean, black reports two files unchanged
+(`fixround2-lint.log`). `git diff --check`: exit 0. Evidence remains under
+`build/fabric-task8-evidence/`, outside SDD cleanup. Per controller scope, no
+full gates or image builds were repeated for this test-only change.

@@ -551,14 +551,17 @@ async def run_scenario(dimension, scenario, cell, config, services, pool, *, cli
         await assert_native_identity(services, before, cell)
         await run_writes(scenario, cell, pool, nonce, client=client)
         return
-    await step("prepare")
-    fixture = scenario.network
-    offset = Path(fixture.observer_path).stat().st_size
-    started = time.time()
-    task = asyncio.create_task(
-        services.transport.execute(config, before.token, "SELECT 1 AS value", (), write=False)
-    )
+    task = None
+    primary_error = None
     try:
+        # Operator cleanup must tolerate partial preparation or no changes.
+        await step("prepare")
+        fixture = scenario.network
+        offset = Path(fixture.observer_path).stat().st_size
+        started = time.time()
+        task = asyncio.create_task(
+            services.transport.execute(config, before.token, "SELECT 1 AS value", (), write=False)
+        )
         if dimension == "login_cancellation":
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
@@ -606,11 +609,24 @@ async def run_scenario(dimension, scenario, cell, config, services, pool, *, cli
             started_at=started,
             dimension=dimension,
         )
+    except BaseException as error:
+        primary_error = error
+        raise
     finally:
-        if not task.done():
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-        await step("cleanup")
+        try:
+            if task is not None:
+                if not task.done():
+                    task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        finally:
+            try:
+                await step("cleanup")
+            except BaseException:
+                if primary_error is None:
+                    raise
+                primary_error.add_note(
+                    "Operator fixture cleanup failed; restore the designated environment manually"
+                )
 
 
 async def run_writes(scenario, cell, pool, nonce, *, client=None):

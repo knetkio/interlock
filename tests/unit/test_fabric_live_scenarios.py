@@ -457,3 +457,125 @@ async def test_approval_hook_must_execute_before_successful_write_acceptance(tmp
             scenario, SimpleNamespace(source_id="saved"), pool, "run", client=client
         )
     assert approved.read_text() == "23" and len(pool.events) == 3
+
+
+@pytest.mark.parametrize("failure", ["prepare", "observer"])
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+async def test_network_setup_failures_always_cleanup_and_preserve_primary_error(
+    tmp_path, monkeypatch, failure, cleanup_fails
+):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    mod = runner()
+    changed = tmp_path / "network-changed"
+    cleaned = tmp_path / "cleanup-receipt"
+    observer = tmp_path / "missing-observer.jsonl"
+    prepare = tmp_path / "prepare.py"
+    cleanup = tmp_path / "cleanup.py"
+    prepare.write_text(
+        'import os,pathlib,sys; pathlib.Path(os.environ["CHANGED"]).touch(); '
+        f'sys.exit({3 if failure == "prepare" else 0})\n'
+    )
+    cleanup.write_text(
+        'import os,pathlib,sys; pathlib.Path(os.environ["CHANGED"]).unlink(missing_ok=True); '
+        'pathlib.Path(os.environ["CLEANED"]).touch(); '
+        f"sys.exit({4 if cleanup_fails else 0})\n"
+    )
+    monkeypatch.setenv("SCENARIO_CHANGED", str(changed))
+    monkeypatch.setenv("SCENARIO_CLEANED", str(cleaned))
+    scenario = mod.Scenario(
+        hooks={
+            "prepare": mod.OperatorHook(
+                argv=[sys.executable, str(prepare)],
+                secret_env={"CHANGED": "env://SCENARIO_CHANGED"},
+            ),
+            "cleanup": mod.OperatorHook(
+                argv=[sys.executable, str(cleanup)],
+                secret_env={
+                    "CHANGED": "env://SCENARIO_CHANGED",
+                    "CLEANED": "env://SCENARIO_CLEANED",
+                },
+            ),
+        },
+        network=mod.NetworkFixture(
+            observer_path=str(observer), allowed_destination="sql.example:1433"
+        ),
+    )
+    services = SimpleNamespace(
+        prepare_source=AsyncMock(return_value=SimpleNamespace(token=object())),
+        transport=SimpleNamespace(execute=AsyncMock()),
+    )
+    error_type = AssertionError if failure == "prepare" else FileNotFoundError
+    with pytest.raises(error_type) as raised:
+        await mod.run_scenario(
+            "tls_certificate_failure",
+            scenario,
+            SimpleNamespace(source_id="saved", host="sql.example"),
+            None,
+            services,
+            None,
+        )
+    if failure == "prepare":
+        assert "Operator scenario step failed" in str(raised.value)
+    else:
+        assert raised.value.filename == str(observer)
+    assert cleaned.exists() and not changed.exists()
+    services.transport.execute.assert_not_awaited()
+    if cleanup_fails:
+        assert "cleanup failed" in " ".join(raised.value.__notes__).lower()
+
+
+async def test_network_observer_failure_cancels_and_awaits_started_transport(tmp_path, monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    mod = runner()
+    observer = tmp_path / "observer.jsonl"
+    cleaned = tmp_path / "cleaned"
+    prepare = tmp_path / "prepare.py"
+    cleanup = tmp_path / "cleanup.py"
+    prepare.write_text('import os,pathlib; pathlib.Path(os.environ["OBSERVER"]).touch()\n')
+    cleanup.write_text('import os,pathlib; pathlib.Path(os.environ["CLEANED"]).touch()\n')
+    monkeypatch.setenv("SCENARIO_OBSERVER", str(observer))
+    monkeypatch.setenv("SCENARIO_CLEANED", str(cleaned))
+    scenario = mod.Scenario(
+        hooks={
+            "prepare": mod.OperatorHook(
+                argv=[sys.executable, str(prepare)],
+                secret_env={"OBSERVER": "env://SCENARIO_OBSERVER"},
+            ),
+            "cleanup": mod.OperatorHook(
+                argv=[sys.executable, str(cleanup)],
+                secret_env={"CLEANED": "env://SCENARIO_CLEANED"},
+            ),
+        },
+        network=mod.NetworkFixture(
+            observer_path=str(observer), allowed_destination="sql.example:1433"
+        ),
+    )
+    stopped = asyncio.Event()
+
+    async def native_boundary(*args, **kwargs):
+        with observer.open("a") as stream:
+            stream.write("invalid-json\n")
+        try:
+            await asyncio.Event().wait()
+        finally:
+            stopped.set()
+
+    services = SimpleNamespace(
+        prepare_source=AsyncMock(return_value=SimpleNamespace(token=object())),
+        transport=SimpleNamespace(execute=native_boundary),
+    )
+    with pytest.raises(json.JSONDecodeError):
+        await mod.run_scenario(
+            "login_cancellation",
+            scenario,
+            SimpleNamespace(source_id="saved", host="sql.example"),
+            None,
+            services,
+            None,
+        )
+    assert stopped.is_set() and cleaned.exists()
