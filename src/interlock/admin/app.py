@@ -465,6 +465,8 @@ def create_app(config: InterLockConfig | None = None) -> FastAPI:
     from interlock.admin.routes.dashboard import router as dashboard_router
     from interlock.admin.routes.dashboard_admin_users import router as admin_users_pages_router
     from interlock.admin.routes.data_sources import router as ds_router
+    from interlock.admin.routes.fabric_auth import install_callback_log_redaction
+    from interlock.admin.routes.fabric_auth import router as fabric_router
     from interlock.admin.routes.identities import router as id_router
     from interlock.admin.routes.ingestion import router as ingestion_router
     from interlock.admin.routes.oidc_mappings import router as oidc_mappings_router
@@ -473,6 +475,8 @@ def create_app(config: InterLockConfig | None = None) -> FastAPI:
 
     app.include_router(auth_router)
     app.include_router(password_router)
+    install_callback_log_redaction()
+    app.include_router(fabric_router)
     app.include_router(ds_router)
     app.include_router(pol_router)
     app.include_router(id_router)

@@ -54,7 +54,11 @@
       <dt>Source ID</dt><dd><code>{{ planned_source_id|default(state.source_id, true) }}</code> <span class="muted">generated from the name; agents use it to reach this source and it cannot be changed later</span></dd>
       <dt>Type</dt><dd>{{ state.source_type }}</dd>
       <dt>Connector</dt><dd><code>{{ state.connector_key }}</code></dd>
-      {% if state.source_type in ['postgresql', 'mysql'] %}
+      {% if state.connector_key == 'fabric_sql' %}
+      <dt>Connection</dt><dd><code>{{ state.host }}/{{ state.database }}</code></dd>
+      <dt>Endpoint</dt><dd>{{ state.endpoint_type|replace('_', ' ') }}</dd>
+      <dt>Authentication</dt><dd>{% if state.auth_mode == 'oauth' %}Saved user · needs sign-in after saving{% else %}Service principal · secret reference supplied{% endif %}</dd>
+      {% elif state.source_type in ['postgresql', 'mysql'] %}
       <dt>Connection</dt><dd><code>{{ state.host }}:{{ state.port }}/{{ state.database }}</code></dd>
       <dt>Credentials</dt>
       <dd>

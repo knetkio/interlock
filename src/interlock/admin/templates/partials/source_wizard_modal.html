@@ -6,7 +6,7 @@
     <div class="modal-header">
       <div>
         <p class="eyebrow">Data Sources</p>
-        <h2 id="source-wizard-modal-title">New Source</h2>
+        <h2 id="source-wizard-modal-title">{% if state.connector_key == 'fabric_sql' %}<img src="/static/assets/connectors/fabric.svg" width="24" height="24" alt="Microsoft Fabric"> {% endif %}New Source</h2>
       </div>
       <button type="button"
               class="btn btn-link js-close-modal"

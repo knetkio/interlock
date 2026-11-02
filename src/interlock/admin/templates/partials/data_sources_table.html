@@ -27,7 +27,7 @@
                hx-get="/dashboard/data-sources/{{ ds.source_id }}"
                hx-target="#main-content" hx-push-url="true">{{ ds.name }}</a></td>
         <td><span class="badge badge-{{ ds.source_type|lower }}">{{ ds.source_type }}</span></td>
-        <td>{{ ds.connector_name|default(ds.connector_key|default('-')) }}</td>
+        <td>{% if ds.connector_key == 'fabric_sql' %}<img src="/static/assets/connectors/fabric.svg" width="24" height="24" alt="Microsoft Fabric"> {% endif %}{{ ds.connector_name|default(ds.connector_key|default('-')) }}</td>
         <td>
           {% if ds.enabled %}
           <span class="health-dot health-green" aria-hidden="true"></span> Enabled

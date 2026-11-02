@@ -28,6 +28,7 @@ strict_files = [
   "src/interlock/admin/routes/auth.py",
   "src/interlock/admin/routes/catalog.py",
   "src/interlock/admin/routes/connectors.py",
+  "src/interlock/admin/routes/fabric_auth.py",
   "src/interlock/admin/routes/password.py",
 ]
 

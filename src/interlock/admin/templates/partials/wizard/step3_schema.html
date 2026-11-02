@@ -41,7 +41,9 @@
     <input type="hidden" name="org" value="{{ state.org|default('') }}">
     <input type="hidden" name="group" value="{{ state.group|default('') }}">
 
-    {% if state.source_type == 'postgresql' %}
+    {% if state.connector_key == 'fabric_sql' %}
+      <p class="muted">Save the source, then connect its saved identity. Catalog discovery runs separately after setup and can be requested from the source page.</p>
+    {% elif state.source_type == 'postgresql' %}
       {% if schema_error %}
       <div class="form-error" role="alert">Could not introspect: {{ schema_error }}</div>
       <p class="muted">You can continue without a schema preview. InterLock will introspect later when an agent runs queries.</p>
