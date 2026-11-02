@@ -386,6 +386,12 @@ async def test_real_auth_replacement_bypasses_warmed_cache_under_new_generation(
         monkeypatch.setenv("FABRIC_CLIENT_SECRET", "rotated-private-secret")
     transport.execute.return_value = {"rows": [{"principal": "new"}]}
     response = await query(request)
+    if replacement == "spn_secret":
+        # Rotation was discovered inside auth, after governance captured the
+        # prior generation. The changed binding requires a fresh preflight.
+        assert response.status_code != 200
+        assert transport.execute.await_count == 1
+        response = await query(request)
     assert response.status_code == 200
     assert "new" in json.loads(response.body)["content"][0]["text"]
     assert transport.execute.await_count == 2
@@ -533,10 +539,54 @@ async def test_alias_fabric_approval_preserves_original_principal_check(
     services, source = runtime(store, monkeypatch)
     source.metadata = metadata
     prepared = await services.prepare_source("one", FabricConfig.from_mapping(SPN))
+    # Approval now reloads the original actor, roles, policy and native catalog.
+    # Seed those real control records; this test still focuses on alias/principal
+    # routing and does not stub away the new acceptance owner.
+    from interlock.catalog.model import CatalogNode, CatalogSnapshot
+    from interlock.catalog.store import apply_snapshot
+
+    actor = await pool.fetchval(
+        "INSERT INTO identities(name,api_key_hash) VALUES ('writer','test-hash') RETURNING id"
+    )
+    role = await pool.fetchval(
+        "INSERT INTO source_roles(source_id,role_key,name) VALUES ('one','writer','Writer') RETURNING id"
+    )
+    await pool.execute(
+        "INSERT INTO identity_source_role_grants(identity_id,source_id,role_id) VALUES ($1,'one',$2)",
+        actor,
+        role,
+    )
+    await pool.execute(
+        "INSERT INTO source_role_permissions(role_id,effect,action,resource_type,resource_pattern) VALUES ($1,'allow','db.table.delete_rows','db.table','dbo.Users.*')",
+        role,
+    )
+    await pool.execute(
+        "INSERT INTO policy_rules(name,conditions,actions) VALUES ('allow','{}','{\"effect\":\"allow\"}')"
+    )
+    scan = await pool.fetchval(
+        "INSERT INTO source_catalog_scans(source_id,trigger,status) VALUES ('one','manual','running') RETURNING id"
+    )
+    snapshot = CatalogSnapshot(
+        source_attributes={
+            "database": SPN["database"],
+            "default_schema": "dbo",
+            "identifier_case_sensitive": True,
+            "upstream_identity": prepared.upstream_identity,
+        },
+        nodes=[
+            CatalogNode("table", ("dbo", "Users"), "Users", "dbo.Users"),
+            CatalogNode("column", ("dbo", "Users", "id"), "id", "dbo.Users.id"),
+        ],
+        complete_subtrees=[()],
+    )
+    async with store.guard_current(prepared.token.context, prepared.config) as conn:
+        await apply_snapshot(
+            conn, source_id="one", scan_id=scan, snapshot=snapshot, max_change_rows=100
+        )
     row = dict(
         id=1,
         source_id="one",
-        identity_id=2,
+        identity_id=actor,
         sql_text="DELETE FROM dbo.Users WHERE id=?",
         request_metadata={"upstream_identity": prepared.upstream_identity, "parameters": [1]},
     )

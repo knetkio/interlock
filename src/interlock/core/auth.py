@@ -96,7 +96,7 @@ class AuthManager:
     def __init__(
         self,
         pg_pool: asyncpg.Pool,
-        redis_client: aioredis.Redis,
+        redis_client: aioredis.Redis | None,
         config: AuthConfig,
         oidc_provider: OIDCProvider | None = None,
     ) -> None:
@@ -108,6 +108,13 @@ class AuthManager:
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    async def current_identity(self, identity_id: int) -> IdentityContext:
+        """Reload a queued actor and active grants without an API key/session."""
+        row = await self._fetch_identity_by_id(identity_id)
+        if row is None:
+            raise IdentityNotFoundError("Original approval actor is disabled or missing")
+        return await self._build_context(row, auth_method="approval")
 
     async def authenticate(self, api_key: str) -> IdentityContext:
         """Authenticate an API key and return an IdentityContext.
@@ -429,6 +436,8 @@ class AuthManager:
 
     async def _redis_get(self, key: str) -> bytes | None:
         """Best-effort Redis GET - returns None on failure."""
+        if self._redis is None:
+            return None
         try:
             return await self._redis.get(key)
         except Exception:
@@ -437,6 +446,8 @@ class AuthManager:
 
     async def _redis_set(self, key: str, value: bytes, ttl: int) -> None:
         """Best-effort Redis SET with TTL."""
+        if self._redis is None:
+            return
         try:
             await self._redis.set(key, value, ex=ttl)
         except Exception:
@@ -444,6 +455,8 @@ class AuthManager:
 
     async def _redis_delete(self, key: str) -> None:
         """Best-effort Redis DELETE."""
+        if self._redis is None:
+            return
         try:
             await self._redis.delete(key)
         except Exception:

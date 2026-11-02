@@ -71,6 +71,20 @@ class SourceRoleEvaluator:
                 missing_permissions=[_missing(request)],
             )
 
+        fabric_names = (
+            request.protocol == "fabric_sql"
+            or "fabric_identifier_case_sensitive" in request.metadata
+        )
+        if fabric_names and any(
+            _unsupported_fabric_pattern(s.resource_pattern, request.resource_case_sensitive)
+            for s in statements
+        ):
+            return SourceRoleDecision(
+                allowed=False,
+                explicit_deny=True,
+                reason="Unsupported Fabric permission identifier equivalence",
+            )
+
         if request.naming_refusals:
             return SourceRoleDecision(
                 allowed=False,
@@ -191,6 +205,7 @@ class SourceRoleEvaluator:
         resources: list[str],
         aliases: dict[str, list[str]] | None = None,
         case_sensitive: bool = False,
+        native_identifiers: bool = False,
     ) -> set[str]:
         """Which of `resources` this identity's roles allow for `action`.
 
@@ -202,7 +217,12 @@ class SourceRoleEvaluator:
         without naming anything it may not.
         """
         statements = await self._load_statements(identity_id, source_id)
-        if not statements:
+        if not statements or (
+            native_identifiers
+            and any(
+                _unsupported_fabric_pattern(s.resource_pattern, case_sensitive) for s in statements
+            )
+        ):
             return set()
         probe = PermissionRequest(
             protocol="mcp",
@@ -338,11 +358,21 @@ def statements_allow(
     action: str,
     resource_type: str,
     resource: str,
+    case_sensitive: bool = False,
+    native_identifiers: bool = False,
 ) -> bool:
     """Whether these statements allow `action` on `resource`: an allow matches
     and no deny does - the evaluator's rule for one resource."""
+    if native_identifiers and any(
+        _unsupported_fabric_pattern(s.resource_pattern, case_sensitive) for s in statements
+    ):
+        return False
     probe = PermissionRequest(
-        protocol="mcp", source_id="", action=action, resource_type=resource_type
+        protocol="mcp",
+        source_id="",
+        action=action,
+        resource_type=resource_type,
+        resource_case_sensitive=case_sensitive,
     )
     matching = [s for s in statements if _matches_statement(s, probe, resource)]
     return any(s.effect == "allow" for s in matching) and not any(
@@ -713,6 +743,12 @@ def _resource_type_from_action(
     if action.startswith("db.schema."):
         return "db.schema"
     return "db.table"
+
+
+def _unsupported_fabric_pattern(pattern: str, case_sensitive: bool) -> bool:
+    return any(part != part.strip() for part in pattern.split(".")) or (
+        not case_sensitive and not pattern.isascii()
+    )
 
 
 def _resource_matches(pattern: str, resource: str, *, case_sensitive: bool = False) -> bool:

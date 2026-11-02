@@ -26,6 +26,12 @@ class IdentityStore:
         )
         self.enabled = True
 
+    async def current_source(self, source_id):
+        from interlock.connections.fabric.credentials import FabricCurrentSource
+
+        await self.assert_current(self.context, self.config)
+        return FabricCurrentSource(self.config, self.context)
+
     async def assert_current(self, context, config):
         if not self.enabled or context != self.context or config != self.config:
             raise FabricAuthError("configuration_changed")

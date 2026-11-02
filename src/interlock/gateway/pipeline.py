@@ -165,6 +165,8 @@ class GatewayDecision:
     # Output column -> the base columns it derives from, so `redact_columns`
     # follows `SELECT ssn AS x` to `ssn`.
     column_lineage: dict[str, set[str]] = field(default_factory=dict)
+    identifier_case_sensitive: bool | None = None
+    upstream_identity: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -233,6 +235,7 @@ class GatewayPipeline:
         *,
         bearer_token: str | None = None,
         require_auth: bool | None = None,
+        approval_accepted: bool = False,
     ) -> GatewayDecision:
         """Resolve identity, rate limit, and evaluate policy."""
         identity = request.identity
@@ -362,6 +365,7 @@ class GatewayPipeline:
             identity,
             classification=write_classification,
             policy_decision=policy_decision,
+            approval_accepted=approval_accepted,
         )
         if write_decision is not None:
             write_decision.identity = identity
@@ -385,6 +389,12 @@ class GatewayPipeline:
         decision = GatewayDecision(
             allowed=True,
             column_lineage=view.column_lineage,
+            identifier_case_sensitive=view.metadata.get("fabric_identifier_case_sensitive"),
+            upstream_identity=(
+                request.metadata.get("upstream_identity")
+                if request.metadata.get("connector_key") == "fabric_sql"
+                else None
+            ),
             identity=identity,
             policy_decision=policy_decision,
             rate_limit_result=rate_result,
@@ -456,6 +466,7 @@ class GatewayPipeline:
         *,
         classification: WriteClassification | None = None,
         policy_decision: PolicyDecision | None = None,
+        approval_accepted: bool = False,
     ) -> GatewayDecision | None:
         if request.operation != "write" and classification is None:
             return None
@@ -508,7 +519,7 @@ class GatewayPipeline:
                 audit_metadata={"write_classification": _write_metadata(classification)},
             )
 
-        if risk_level not in (RiskLevel.HIGH, RiskLevel.MEDIUM):
+        if approval_accepted or risk_level not in (RiskLevel.HIGH, RiskLevel.MEDIUM):
             return None
 
         if self._approval_queue is None:
@@ -539,6 +550,8 @@ class GatewayPipeline:
             "normalized_operation": classification.operation_type,
             **request.metadata,
         }
+        if request.metadata.get("connector_key") == "fabric_sql":
+            metadata["parameters"] = (request.parameters or {}).get("parameters") or []
         try:
             submitted = await self._approval_queue.submit(
                 identity_id=identity.identity_id,
@@ -608,6 +621,21 @@ class GatewayPipeline:
             columns, column_gaps = _column_resources(access)
             lineage = access.lineage
             deny_columns = _column_spellings(access)
+        if (
+            naming is not None
+            and naming.connector_key == "fabric_sql"
+            and write_classification is not None
+        ):
+            for table in tables or []:
+                resolved = resolve_table(table, naming)
+                pair = tuple(resolved.canonical.split("."))
+                if (
+                    len(pair) != 2
+                    or (naming.relation_types or {}).get((pair[0], pair[1])) != "table"
+                ):
+                    scope_refusals.append(
+                        "Fabric writes require a catalog-verified table target; views and unknown relation types are unsupported"
+                    )
         permission_request = build_permission_request(
             protocol=request.protocol,
             source_id=request.source_id,

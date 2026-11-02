@@ -607,7 +607,7 @@ async def lifespan(app: Starlette) -> AsyncIterator[None]:
     app.state.source_role_evaluator = source_role_evaluator
 
     # How each SQL source resolves a bare table name, from the source catalog.
-    sql_naming_resolver = CatalogNamingResolver(pg_pool, registry)
+    sql_naming_resolver = CatalogNamingResolver(pg_pool, registry, fabric_services=fabric_services)
     await sql_naming_resolver.setup_listener()
     app.state.sql_naming_resolver = sql_naming_resolver
 

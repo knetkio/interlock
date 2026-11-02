@@ -158,6 +158,13 @@ class PolicyEngine:
                 identifier_case_sensitive,
             ):
                 effect = rule.actions.get("effect", "deny")
+                if identifier_case_sensitive is False and any(
+                    not str(name).isascii() or any(p != p.strip() for p in str(name).split("."))
+                    for name in rule.actions.get("redact_columns", [])
+                ):
+                    return PolicyDecision(
+                        allowed=False, reason="Unsupported Fabric redaction identifier equivalence"
+                    )
                 allowed = effect == "allow"
                 redact_columns = rule.actions.get("redact_columns", [])
                 rate_limit = _normalize_rate_limit(rule.actions.get("rate_limit"))
@@ -242,6 +249,15 @@ class PolicyEngine:
             columns = [normalize(c) for c in columns or []]
             table_spellings = {normalize(t) for t in table_spellings or []}
             column_spellings = {normalize(c) for c in column_spellings or []}
+        # A CI deny outside the proven ASCII domain cannot silently become
+        # a non-match. Allows using such identifiers cannot establish scope.
+        if identifier_case_sensitive is False:
+            scoped_names = [*cond.get("tables", []), *cond.get("columns", [])]
+            if any(
+                not str(name).isascii() or any(p != p.strip() for p in str(name).split("."))
+                for name in scoped_names
+            ):
+                return rule.actions.get("effect", "deny") != "allow"
         # tables
         rule_tables = cond.get("tables")
         if rule_tables:

@@ -18,6 +18,7 @@ from interlock.core.sql_governance import naming_for
 from interlock.models import HealthStatus, PermissionRequest
 
 if TYPE_CHECKING:
+    from interlock.catalog.model import ScanLimits
     from interlock.connections.fabric.runtime import FabricAuthenticatedSource, FabricServices
 
 
@@ -51,6 +52,31 @@ class FabricSQLAdapter(BaseConnectorAdapter):
         ):
             raise ValueError("Fabric supports one SELECT, INSERT, UPDATE, or DELETE statement")
         statement = statements[0]
+        if any(select.args.get("for_") for select in statement.find_all(exp.Select)):
+            raise ValueError("Fabric structured FOR XML/JSON results have unsupported column scope")
+        wildcard_selects = [
+            select
+            for select in statement.find_all(exp.Select)
+            if any(projection.is_star for projection in select.expressions)
+        ]
+        positional_wildcards = any(
+            node.args.get("alias") is not None
+            and node.args["alias"].args.get("columns")
+            and any(select in wildcard_selects for select in node.find_all(exp.Select))
+            for node in statement.find_all(exp.CTE, exp.Subquery)
+        )
+        if wildcard_selects and (
+            positional_wildcards
+            or statement.find(exp.SetOperation) is not None
+            or any(
+                isinstance(select.parent, exp.Subquery)
+                and not isinstance(select.parent.parent, (exp.From, exp.Join))
+                for select in wildcard_selects
+            )
+        ):
+            raise ValueError(
+                "Fabric wildcard projections under positional aliases, set operations or scalar subqueries have unsupported result scope"
+            )
         if statement.find(exp.Returning) is not None:
             raise ValueError(
                 "Fabric OUTPUT is unsupported until returned columns have separate read authorization"
@@ -247,11 +273,21 @@ class FabricSQLAdapter(BaseConnectorAdapter):
                 self.source_id or "<unsaved>", False, (time.monotonic() - start) * 1000, str(exc)
             )
 
-    async def metadata_snapshot(self) -> dict[str, Any]:
-        # Task 6 owns the system-catalog query and coherent snapshot contract.
-        self._runtime()
-        raise NotImplementedError("Fabric metadata collection is not available yet")
+    async def metadata_snapshot(self, *, limits: ScanLimits | None = None) -> dict[str, Any]:
+        from interlock.catalog.collectors.fabric import metadata_snapshot, public_snapshot
+        from interlock.catalog.model import ScanLimits
+
+        services = self._runtime()
+        current = await services.store.current_source(self.source_id or "")
+        snapshot = await metadata_snapshot(
+            services, self.source_id or "", current.config, limits or ScanLimits()
+        )
+        await services.store.assert_current(current.context, current.config)
+        return public_snapshot(snapshot)
 
     async def introspect(self, connection_config: dict[str, Any]) -> dict[str, Any]:
-        self._runtime()
+        services = self._runtime()
+        current = await services.store.current_source(self.source_id or "")
+        if current.config != FabricConfig.from_mapping(connection_config):
+            raise ValueError("Fabric introspection configuration changed")
         return await self.metadata_snapshot()

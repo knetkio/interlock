@@ -12,10 +12,15 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any
+from dataclasses import asdict
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from interlock.connections.fabric.runtime import FabricServices
 
 from interlock.catalog.model import TABLE_LIKE_NODE_TYPES
 from interlock.catalog.runner import CATALOG_CHANGED_CHANNEL
+from interlock.connections.connectors import connector_key_for
 from interlock.core.sql_governance import SqlNaming, naming_for
 
 logger = logging.getLogger(__name__)
@@ -36,7 +41,7 @@ ORDER BY parent_path, ordinal NULLS LAST, name
 """
 
 _TABLES_SQL = """
-SELECT path FROM source_catalog
+SELECT path, node_type FROM source_catalog
 WHERE source_id = $1 AND node_type = ANY($2::text[]) AND removed_at IS NULL
 """
 
@@ -55,7 +60,15 @@ def _attributes(value: Any) -> dict[str, Any]:
 class CatalogNamingResolver:
     """Per-source SQL naming, from the registry and the source catalog."""
 
-    def __init__(self, pool: Any, registry: Any, *, ttl_seconds: float = 60.0) -> None:
+    def __init__(
+        self,
+        pool: Any,
+        registry: Any,
+        *,
+        ttl_seconds: float = 60.0,
+        fabric_services: FabricServices | None = None,
+    ) -> None:
+        self._fabric_services = fabric_services
         self._pool = pool
         self._registry = registry
         self._ttl = ttl_seconds
@@ -67,12 +80,17 @@ class CatalogNamingResolver:
         source = self._registry.get(source_id) if self._registry is not None else None
         if source is None:
             return None
-        connector_key = str(getattr(source, "connector_key", "") or "").lower()
+        connector_key = connector_key_for(
+            getattr(
+                getattr(source, "source_type", None), "value", getattr(source, "connector_key", "")
+            ),
+            getattr(source, "metadata", None),
+        )
         if connector_key not in SQL_CONNECTOR_KEYS:
             return None
         cached = self._cache.get(source_id)
         now = time.monotonic()
-        if cached is not None and now - cached[0] < self._ttl:
+        if connector_key != "fabric_sql" and cached is not None and now - cached[0] < self._ttl:
             return cached[1]
         config = dict(getattr(source, "connection_config", {}) or {})
         try:
@@ -92,6 +110,16 @@ class CatalogNamingResolver:
         root = await self._pool.fetchval(_ROOT_SQL, source_id)
         if root is None:
             return naming_for(connector_key, config)
+        if connector_key == "fabric_sql":
+            if self._fabric_services is None:
+                return naming_for(connector_key, config)
+            current = await self._fabric_services.store.current_source(source_id)
+            from interlock.connections.fabric.config import FabricConfig
+
+            if current.config != FabricConfig.from_mapping(config) or _attributes(root).get(
+                "upstream_identity"
+            ) != asdict(current.context):
+                return naming_for(connector_key, config)
         rows = await self._pool.fetch(_TABLES_SQL, source_id, sorted(TABLE_LIKE_NODE_TYPES))
         normalize = str if connector_key == "fabric_sql" else lambda value: str(value).lower()
         known = frozenset(
@@ -111,6 +139,15 @@ class CatalogNamingResolver:
             _attributes(root),
             known,
             {key: tuple(names) for key, names in columns.items()},
+            relation_types=(
+                {
+                    (str(row["path"][-2]), str(row["path"][-1])): str(row["node_type"])
+                    for row in rows
+                    if len(row["path"]) >= 2
+                }
+                if connector_key == "fabric_sql"
+                else None
+            ),
         )
 
     def invalidate(self, source_id: str | None = None) -> None:

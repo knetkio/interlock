@@ -58,14 +58,20 @@ def _statement(row: Any) -> PermissionStatement:
 
 
 def exposing_roles(
-    statements: list[PermissionStatement], *, node_type: str, path: list[str]
+    statements: list[PermissionStatement],
+    *,
+    node_type: str,
+    path: list[str],
+    case_sensitive: bool = False,
+    native_identifiers: bool = False,
 ) -> list[str]:
     """Role keys that alone would allow reading this node, without denying it."""
+    normalize = str if case_sensitive else str.lower
     if node_type == "column":
-        resource = ".".join(part.lower() for part in path)
+        resource = ".".join(normalize(part) for part in path)
         resource_type = "db.column"
     else:
-        resource = ".".join(part.lower() for part in path) + ".*"
+        resource = ".".join(normalize(part) for part in path) + ".*"
         resource_type = "db.table"
     by_role: dict[str, list[PermissionStatement]] = {}
     for statement in statements:
@@ -78,11 +84,20 @@ def exposing_roles(
             action="db.table.select",
             resource_type=resource_type,
             resource=resource,
+            case_sensitive=case_sensitive,
+            native_identifiers=native_identifiers,
         )
     )
 
 
-async def record_exposure(conn: Any, *, source_id: str, scan_id: int) -> int:
+async def record_exposure(
+    conn: Any,
+    *,
+    source_id: str,
+    scan_id: int,
+    case_sensitive: bool = False,
+    native_identifiers: bool = False,
+) -> int:
     """Write the exposure of every table or column this scan added. Returns rows written."""
     added = await conn.fetch(_ADDED_SQL, scan_id, sorted({*TABLE_LIKE_NODE_TYPES, "column"}))
     if not added:
@@ -94,7 +109,11 @@ async def record_exposure(conn: Any, *, source_id: str, scan_id: int) -> int:
     written = 0
     for change in added:
         roles = exposing_roles(
-            statements, node_type=str(change["node_type"]), path=list(change["path"])
+            statements,
+            node_type=str(change["node_type"]),
+            path=list(change["path"]),
+            case_sensitive=case_sensitive,
+            native_identifiers=native_identifiers,
         )
         identities: set[int] = set()
         for role in roles:

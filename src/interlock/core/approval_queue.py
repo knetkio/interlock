@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 import asyncpg
 import httpx
 
-from interlock.connections.connectors import get_adapter
+from interlock.connections.connectors import connector_key_for, get_adapter
 from interlock.connections.manager import ConnectionManager
 from interlock.connections.source_config import config_bool
 from interlock.errors import InterLockError, WriteApprovalRequiredError
@@ -267,6 +267,9 @@ class ApprovalQueue:
         row = await self._pool.fetchrow(_GET_SQL, approval_id)
         if row is not None:
             metadata = _parse_metadata(row["request_metadata"])
+            fabric_approval = (
+                metadata.get("connector_key") == "fabric_sql" or "upstream_identity" in metadata
+            )
             # Execution is always attempted. Gating it on whether a
             # ConnectionManager happened to be wired meant a source reached
             # through its own connector was marked approved without the write
@@ -286,6 +289,8 @@ class ApprovalQueue:
                     await self._execute_sql(row, metadata)
                 await self._pool.execute(_MARK_EXECUTED_SQL, approval_id)
                 executed = True
+                if fabric_approval:
+                    await self._audit_fabric_approval(row, metadata, status="success")
 
                 # Invalidate caches after successful write
                 await self._invalidate_after_execution(
@@ -295,13 +300,14 @@ class ApprovalQueue:
                 )
 
             except Exception as exc:
-                logger.warning(
-                    "Failed to execute approved write %d: %s",
-                    approval_id,
-                    exc,
-                )
+                failure = type(exc).__name__ if fabric_approval else str(exc)
+                if fabric_approval:
+                    await self._audit_fabric_approval(
+                        row, metadata, status="error", failure=failure
+                    )
+                logger.warning("Failed to execute approved write %d: %s", approval_id, failure)
                 try:
-                    await self._pool.execute(_MARK_FAILED_SQL, approval_id, str(exc))
+                    await self._pool.execute(_MARK_FAILED_SQL, approval_id, failure)
                 except Exception:
                     logger.warning(
                         "Failed to mark approval %d as failed",
@@ -320,7 +326,7 @@ class ApprovalQueue:
                     )
                 )
                 raise InterLockError(
-                    f"Approved write {approval_id} failed during execution: {exc}"
+                    f"Approved write {approval_id} failed during execution: {failure}"
                 ) from exc
 
         # Fire NOTIFY so listeners know about the approval
@@ -355,7 +361,19 @@ class ApprovalQueue:
         as approved that never ran.
         """
         source_id = row["source_id"]
-        source = self._registry.get(source_id) if self._registry is not None else None
+        if metadata.get("connector_key") == "fabric_sql" or "upstream_identity" in metadata:
+            from interlock.metadata.registry import MetadataRegistry
+
+            fresh_registry = MetadataRegistry(self._pool)
+            await fresh_registry.load()
+            source = fresh_registry.get(source_id)
+            if (
+                source is None
+                or connector_key_for(source.source_type.value, source.metadata) != "fabric_sql"
+            ):
+                raise InterLockError("Fabric approval source changed or is disabled")
+        else:
+            source = self._registry.get(source_id) if self._registry is not None else None
         source_type = getattr(getattr(source, "source_type", None), "value", None)
 
         # PostgreSQL keeps the pooled path: it carries the mapped role, which
@@ -382,7 +400,7 @@ class ApprovalQueue:
     ) -> None:
         """Run the approved write through the source's own connector."""
         adapter = get_adapter(
-            source_type,
+            connector_key_for(source_type, getattr(source, "metadata", None)),
             getattr(source, "metadata", None) or {},
             fabric_services=self._fabric_services,
             source_id=row["source_id"],
@@ -421,6 +439,7 @@ class ApprovalQueue:
                 config = FabricConfig.from_mapping(request["connection_config"])
                 adapter.validate_sql(row["sql_text"], database=config.database)
                 authenticated = await services.prepare_source(row["source_id"], config)
+                await self._revalidate_fabric_approval(row, source, metadata)
                 if metadata.get("upstream_identity") != authenticated.upstream_identity:
                     raise InterLockError("Fabric approval identity changed; submit a new request")
                 await adapter.execute_prepared(request, authenticated, write=True)
@@ -446,6 +465,74 @@ class ApprovalQueue:
                 f"carries only a statement ({type(exc).__name__}: {exc}). "
                 "This connector has no governed write entry point yet."
             ) from exc
+
+    async def _revalidate_fabric_approval(self, row: Any, source: Any, metadata: dict) -> None:
+        """Fresh control records, original actor, no saved API keys or cached policy."""
+        from dataclasses import asdict
+        from types import SimpleNamespace
+
+        from interlock.catalog.naming import CatalogNamingResolver
+        from interlock.config import AuthConfig
+        from interlock.core.auth import AuthManager
+        from interlock.core.policy import PolicyEngine
+        from interlock.core.source_roles import SourceRoleEvaluator
+        from interlock.core.write_classifier import WriteClassifier
+        from interlock.gateway.pipeline import GatewayPipeline, sql_gateway_request
+
+        services = self._fabric_services
+        if services is None:
+            raise InterLockError("Fabric authentication services are unavailable")
+        current = await services.store.current_source(row["source_id"])
+        if metadata.get("upstream_identity") != asdict(current.context):
+            raise InterLockError("Fabric approval identity changed; submit a new request")
+        identity = await AuthManager(self._pool, None, AuthConfig()).current_identity(
+            row["identity_id"]
+        )
+        policy = PolicyEngine(self._pool)
+        await policy.load()
+        naming = CatalogNamingResolver(
+            self._pool, SimpleNamespace(get=lambda _: source), fabric_services=services
+        )
+        pipeline = GatewayPipeline(
+            policy_engine=policy,
+            source_role_evaluator=SourceRoleEvaluator(self._pool),
+            sql_naming=naming,
+            write_classifier=WriteClassifier(),
+        )
+        request = sql_gateway_request(
+            row["sql_text"],
+            protocol="mcp",
+            source_id=row["source_id"],
+            dialect="tsql",
+            metadata={"connector_key": "fabric_sql"},
+        )
+        request.identity = identity
+        decision = await pipeline.preflight(request, require_auth=True, approval_accepted=True)
+        if not decision.allowed:
+            raise InterLockError("Fabric approval no longer authorized: " + decision.reason)
+
+    async def _audit_fabric_approval(
+        self, row: Any, metadata: dict, *, status: str, failure: str | None = None
+    ) -> None:
+        from interlock.audit.logger import AuditLogger
+        from interlock.models import AuditRecord
+
+        await AuditLogger(self._pool).log(
+            AuditRecord(
+                identity_id=row["identity_id"],
+                source_id=row["source_id"],
+                operation="write",
+                protocol="fabric_sql",
+                status=status,
+                error_message=failure,
+                approval_id=row["id"],
+                approval_status="executed" if status == "success" else "failed",
+                request_metadata={
+                    "upstream_identity": metadata.get("upstream_identity"),
+                    "approval_id": row["id"],
+                },
+            )
+        )
 
     async def _execute_http(self, row: asyncpg.Record, metadata: dict) -> None:
         if self._registry is None:

@@ -30,6 +30,7 @@ from starlette.routing import Route
 
 from interlock import release_version
 from interlock.cache.provenance import redaction_of, with_redaction
+from interlock.catalog.collectors import ENFORCED_CONNECTOR_KEYS as _CATALOG_ENFORCED_CONNECTORS
 from interlock.connections.connectors import connector_key_for, get_adapter
 from interlock.connections.fabric.runtime import FabricAuthenticatedSource
 from interlock.core.normalizer import (
@@ -955,6 +956,20 @@ class MCPAdapter:
         if gateway_decision is not None and gateway_decision.write_classification is not None:
             op_type = "write"
         if getattr(request.state, "gateway_decision", None) is None:
+            registry = self._resolve_registry(request)
+            saved = registry.get(source_id) if registry else None
+            key = connector_key_for(saved.source_type.value, saved.metadata) if saved else ""
+            fallback_metadata: dict[str, Any] = {
+                "tool_name": "agentgate_query",
+                "connector_key": key,
+            }
+            if key == "fabric_sql":
+                try:
+                    fallback_metadata["upstream_identity"] = await self._fabric_identity_binding(
+                        request, saved
+                    )
+                except Exception as exc:
+                    return _tool_failure_response(exc, _call_correlation_id(request))
             gateway_request = GatewayRequest(
                 protocol="mcp",
                 source_id=source_id,
@@ -964,7 +979,9 @@ class MCPAdapter:
                 path="agentgate_query",
                 sql=sql,
                 parameters=args,
-                metadata={"tool_name": "agentgate_query"},
+                metadata=fallback_metadata,
+                normalized_request=nq,
+                tables=list(getattr(nq, "tables", []) or []),
                 dialect=self._dialect_for_source(request, source_id),
             )
             decision = await GatewayPipeline.from_state(state).preflight(gateway_request)
@@ -1009,6 +1026,11 @@ class MCPAdapter:
                 fabric_source = await services.prepare_source(
                     source_id, FabricConfig.from_mapping(source_config.connection_config)
                 )
+                governed_identity = getattr(
+                    getattr(request.state, "gateway_decision", None), "upstream_identity", None
+                )
+                if governed_identity != fabric_source.upstream_identity:
+                    raise ValueError("Fabric identity changed after authorization; retry request")
             except Exception as exc:
                 return _tool_failure_response(exc, _call_correlation_id(request))
 
@@ -1017,7 +1039,14 @@ class MCPAdapter:
                 protocol="mcp",
                 source_id=source_id,
                 normalized_sql=nq.normalized_sql or sql,
-                parameters=getattr(nq, "parameters", None),
+                parameters=(
+                    {
+                        "normalized": getattr(nq, "parameters", None),
+                        "bound": args.get("parameters") or [],
+                    }
+                    if fabric_source
+                    else getattr(nq, "parameters", None)
+                ),
                 identity_role=role_context,
                 mapped_pg_role=getattr(identity, "mapped_pg_role", None),
                 tenant_id=getattr(identity, "team", None),
@@ -1050,6 +1079,13 @@ class MCPAdapter:
                             await fabric_source.assert_current()
                         except Exception as exc:
                             return _tool_failure_response(exc, _call_correlation_id(request))
+                    if fabric_source is not None:
+                        cached_rows = json.loads(result.data)
+                        _validate_fabric_result_columns(
+                            sql,
+                            [key for row in cached_rows for key in row],
+                            getattr(request.state, "gateway_decision", None),
+                        )
                     cache_tier = result.tier
                     # The cached JSON was redacted when stored; record that
                     # redaction, since no scanner runs on a hit.
@@ -1121,6 +1157,13 @@ class MCPAdapter:
                         if op_type == "write"
                         else [dict(row) for row in connector_result.get("rows", [])]
                     )
+                    if op_type == "read":
+                        _validate_fabric_result_columns(
+                            sql,
+                            connector_result.get("columns")
+                            or [key for row in rows_dicts for key in row],
+                            getattr(request.state, "gateway_decision", None),
+                        )
                 elif op_type == "write":
                     connector_result = await adapter.execute_write(connector_request)
                     rows_dicts = [connector_result]
@@ -1183,6 +1226,9 @@ class MCPAdapter:
                 rows_dicts,
                 redact_fields,
                 getattr(gateway_decision, "column_lineage", None) or {},
+                identifier_case_sensitive=getattr(
+                    gateway_decision, "identifier_case_sensitive", None
+                ),
             )
             if policy_stats["count"]:
                 redaction_stats = {**(redaction_stats or {}), "policy": policy_stats}
@@ -1505,7 +1551,11 @@ class MCPAdapter:
         state = getattr(request.app, "state", None)
         registry = self._resolve_registry(request)
         source = registry.get(source_id) if registry is not None else None
-        connector_key = str(getattr(source, "connector_key", "") or "")
+        connector_key = (
+            connector_key_for(source.source_type.value, source.metadata)
+            if source is not None
+            else ""
+        )
         if connector_key not in _CATALOG_ENFORCED_CONNECTORS:
             return {
                 "enforced": False,
@@ -1526,6 +1576,14 @@ class MCPAdapter:
             f"{schema}.{name}": list(cols) for (schema, name), cols in naming.columns.items()
         }
         tables = sorted(f"{schema}.{name}" for schema, name in naming.known_tables or ())
+        if naming.connector_key == "fabric_sql":
+            tables = [table for table in tables if not resolve_table(table, naming).refusal]
+            if naming.identifier_case_sensitive is False:
+                tables = [
+                    table
+                    for table in tables
+                    if all(c.isascii() and c == c.strip() for c in columns_by_table.get(table, []))
+                ]
         truncated = len(tables) > _RESOURCES_TABLE_LIMIT
         tables = tables[:_RESOURCES_TABLE_LIMIT]
         whole_resources = [f"{table}.*" for table in tables]
@@ -1541,6 +1599,7 @@ class MCPAdapter:
             resources=whole_resources,
             aliases=aliases,
             case_sensitive=naming.identifier_case_sensitive is True,
+            native_identifiers=naming.connector_key == "fabric_sql",
         )
         readable_columns = await evaluator.allowed_resources(
             identity_id,
@@ -1550,6 +1609,7 @@ class MCPAdapter:
             resources=column_resources,
             aliases=aliases,
             case_sensitive=naming.identifier_case_sensitive is True,
+            native_identifiers=naming.connector_key == "fabric_sql",
         )
         policy = getattr(state, "policy_engine", None)
         listed: list[dict[str, Any]] = []
@@ -2537,7 +2597,7 @@ def _clamp_int(value: int, *, default: int, minimum: int, maximum: int) -> int:
 
 # Sources whose SQL governance reads the catalog, and how many tables
 # interlock_describe_access lists for one before saying it stopped.
-_CATALOG_ENFORCED_CONNECTORS = frozenset({"postgresql", "mysql", "mariadb", "snowflake"})
+
 _RESOURCES_TABLE_LIMIT = 200
 
 
@@ -2592,10 +2652,37 @@ def _grant_allows_source_listing(grant: Any) -> bool:
     return True
 
 
+def _validate_fabric_result_columns(sql: str, columns: list[str], decision: Any) -> None:
+    """One origin/cache delivery boundary for catalog-expanded wildcard shape.
+
+    A wildcard authorized against an older catalog must never expose columns
+    added since that scan. Explicit projections keep their normal lineage.
+    """
+    import sqlglot
+    from sqlglot import exp
+
+    parsed = sqlglot.parse_one(sql, read="tsql")
+    if not any(
+        projection.is_star
+        for select in parsed.find_all(exp.Select)
+        for projection in select.expressions
+    ):
+        return
+    lineage = getattr(decision, "column_lineage", None) or {}
+    normalize = str if getattr(decision, "identifier_case_sensitive", None) is True else str.lower
+    expected = {normalize(name) for name in lineage}
+    if not expected or any(normalize(name) not in expected for name in columns):
+        raise ValueError(
+            "Fabric result shape changed since catalog authorization; rescan and retry"
+        )
+
+
 def redact_policy_columns(
     rows: list[dict[str, Any]],
     fields: list[str],
     lineage: dict[str, set[str]],
+    *,
+    identifier_case_sensitive: bool | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Replace the values of every output column a policy says to redact.
 
@@ -2604,20 +2691,21 @@ def redact_policy_columns(
     `SELECT ssn AS x` and `SELECT upper(ssn)` are redacted as `ssn`. With no
     lineage for a column, its own name is matched, as the HTTP proxy does.
     """
-    wanted = {field.strip().lower() for field in fields if field.strip()}
+    normalize = str if identifier_case_sensitive is True else str.lower
+    wanted = {normalize(field.strip()) for field in fields if field.strip()}
 
     def matches(base: str) -> bool:
-        base = base.lower()
+        base = normalize(base)
         return any(base == f or base.endswith(f".{f}") for f in wanted)
 
     targets: set[str] = set()
     if rows:
         for name in rows[0]:
-            sources = lineage.get(str(name).lower())
+            sources = lineage.get(normalize(str(name)))
             if sources:
                 if any(matches(source) for source in sources):
                     targets.add(name)
-            elif str(name).lower() in {f.rsplit(".", 1)[-1] for f in wanted}:
+            elif normalize(str(name)) in {f.rsplit(".", 1)[-1] for f in wanted}:
                 targets.add(name)
     count = 0
     redacted: list[dict[str, Any]] = []

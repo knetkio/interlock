@@ -96,6 +96,7 @@ def column_access(
     catalog: ColumnCatalog | None,
     case_sensitive: bool = False,
     native_identifiers: bool = False,
+    _scoped_lineage: bool = False,
 ) -> ColumnAccess:
     if native_identifiers and not case_sensitive and catalog is not None:
         # The initial CI contract is ASCII case equivalence only. Preserve the
@@ -124,6 +125,7 @@ def column_access(
             sql,
             dialect=dialect,
             resolve=lambda name: resolve(name).lower(),
+            _scoped_lineage=True,
             catalog={
                 (s.lower(), t.lower()): tuple(c.lower() for c in cols)
                 for (s, t), cols in relevant.items()
@@ -158,6 +160,7 @@ def column_access(
             catalog=catalog,
             access=access,
             outermost=len(statements) == 1,
+            scoped_lineage=native_identifiers or _scoped_lineage,
         )
     return access
 
@@ -194,6 +197,7 @@ def _statement_access(
     catalog: ColumnCatalog | None,
     access: ColumnAccess,
     outermost: bool,
+    scoped_lineage: bool = False,
 ) -> None:
     statement = statement.copy()
     tables = _rewrite_tables(statement, resolve, access.case_sensitive)
@@ -272,7 +276,9 @@ def _statement_access(
                 else:
                     access.gaps.setdefault(key, "INSERT without a column list")
 
-    if outermost and isinstance(qualified, exp.Select):
+    if outermost and scoped_lineage and isinstance(qualified, exp.Query):
+        access.lineage = _native_lineage(qualified, access.case_sensitive)
+    elif outermost and isinstance(qualified, exp.Select):
         access.lineage = _lineage(qualified, access.case_sensitive)
 
 
@@ -336,4 +342,62 @@ def _projection_sources(
                 for inner in select.expressions:
                     if normalize(inner.alias_or_name) == normalize(column.name):
                         found |= _projection_sources(source, inner, case_sensitive)
+    return found
+
+
+def _native_lineage(query: exp.Query, case_sensitive: bool = False) -> dict[str, set[str]]:
+    root = build_scope(query)
+    if root is None:
+        return {}
+    normalize = str if case_sensitive else str.lower
+    return {
+        normalize(projection.alias_or_name): _output_sources(root, index, case_sensitive, set())
+        for index, projection in enumerate(query.selects)
+    }
+
+
+def _output_sources(
+    scope: Scope, index: int, case_sensitive: bool, visiting: set[tuple[int, int]]
+) -> set[str]:
+    key = (id(scope), index)
+    if key in visiting:
+        return set()
+    visiting = visiting | {key}
+    if isinstance(scope.expression, exp.SetOperation):
+        return set().union(
+            *(
+                _output_sources(branch, index, case_sensitive, visiting)
+                for branch in scope.union_scopes
+            )
+        )
+    if not isinstance(scope.expression, exp.Select) or index >= len(scope.expression.expressions):
+        return set()
+    return _native_projection_sources(
+        scope, scope.expression.expressions[index], case_sensitive, visiting
+    )
+
+
+def _native_projection_sources(
+    scope: Scope,
+    projection: exp.Expression,
+    case_sensitive: bool = False,
+    visiting: set[tuple[int, int]] | None = None,
+) -> set[str]:
+    normalize = str if case_sensitive else str.lower
+    found: set[str] = set()
+    scopes = {id(child.expression): child for child in scope.traverse()}
+    for column in projection.find_all(exp.Column):
+        # Scalar subqueries have their own aliases; correlated references walk
+        # out to their enclosing scope. Never resolve a nested alias as outer.
+        owner = scopes.get(id(column.find_ancestor(exp.Select)), scope)
+        source = owner.sources.get(column.table)
+        while source is None and owner.parent is not None:
+            owner = owner.parent
+            source = owner.sources.get(column.table)
+        if isinstance(source, exp.Table):
+            found.add(f"{_table_key(source, case_sensitive)}.{normalize(column.name)}")
+        elif isinstance(source, Scope) and isinstance(source.expression, exp.Query):
+            for index, inner in enumerate(source.expression.selects):
+                if normalize(inner.alias_or_name) == normalize(column.name):
+                    found |= _output_sources(source, index, case_sensitive, visiting or set())
     return found

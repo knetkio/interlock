@@ -266,8 +266,12 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     await registry.load()
     await registry.setup_listener()
     app.state.registry = registry
+    fabric_services = build_fabric_services(app.state.pg_pool, config.fabric)
+    app.state.fabric_services = fabric_services
     # The dry-runs resolve SQL names exactly as the gateway does.
-    sql_naming_resolver = CatalogNamingResolver(app.state.pg_pool, registry)
+    sql_naming_resolver = CatalogNamingResolver(
+        app.state.pg_pool, registry, fabric_services=fabric_services
+    )
     await sql_naming_resolver.setup_listener()
     app.state.sql_naming_resolver = sql_naming_resolver
     # The signing key was resolved once in create_app() and stored on
@@ -358,8 +362,6 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
 
     circuit_breakers = CircuitBreakerRegistry()
-    fabric_services = build_fabric_services(app.state.pg_pool, config.fabric)
-    app.state.fabric_services = fabric_services
     conn_manager = ConnectionManager(
         registry,
         circuit_breakers=circuit_breakers,

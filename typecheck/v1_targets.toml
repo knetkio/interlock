@@ -99,6 +99,7 @@ paths = ["src/interlock/catalog"]
 strict_files = [
   "src/interlock/catalog/__init__.py",
   "src/interlock/catalog/collectors/__init__.py",
+  "src/interlock/catalog/collectors/fabric.py",
   "src/interlock/catalog/collectors/mysql.py",
   "src/interlock/catalog/collectors/postgres.py",
   "src/interlock/catalog/collectors/snowflake.py",

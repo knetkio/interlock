@@ -66,6 +66,7 @@ class SqlNaming:
     columns: Mapping[tuple[str, str], tuple[str, ...]] | None = None
 
     identifier_case_sensitive: bool | None = None
+    relation_types: Mapping[tuple[str, str], str] | None = None
 
     def identifier(self, value: str) -> str:
         return value if self.identifier_case_sensitive is True else value.lower()
@@ -94,6 +95,7 @@ def naming_for(
     catalog_attributes: dict[str, Any] | None = None,
     known_tables: frozenset[tuple[str, str]] | None = None,
     columns: Mapping[tuple[str, str], tuple[str, ...]] | None = None,
+    relation_types: Mapping[tuple[str, str], str] | None = None,
 ) -> SqlNaming:
     """Naming for one source, from its configuration and, if scanned, its catalog."""
     config = connection_config or {}
@@ -111,6 +113,7 @@ def naming_for(
             known_tables=known_tables,
             columns=columns,
             identifier_case_sensitive=case_sensitive,
+            relation_types=relation_types,
         )
     if key in _MYSQL:
         database = _lower(facts.get("default_schema") or config.get("database"))
