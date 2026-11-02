@@ -1,0 +1,22 @@
+<div class="fabric-fields">
+  <p class="field-help"><img src="/static/assets/connectors/fabric.svg" width="24" height="24" alt="Microsoft Fabric"> Microsoft Fabric SQL</p>
+  <div class="form-row">
+    <label>Endpoint type<select name="endpoint_type">
+      {% for value, label in [('warehouse','Warehouse'), ('lakehouse_sql','Lakehouse SQL analytics endpoint'), ('sql_database','SQL Database')] %}
+      <option value="{{ value }}" {% if form.endpoint_type == value %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select></label>
+    <label>SQL server<input name="host" required value="{{ form.host|default('') }}" placeholder="SQL connection server from Fabric"></label>
+    <label>Database<input name="database" required value="{{ form.database|default('') }}"></label>
+  </div>
+  <div class="form-row">
+    <label>Authentication<select name="auth_mode" class="js-fabric-auth-mode">
+      <option value="oauth" {% if form.auth_mode != 'spn' %}selected{% endif %}>Saved user (OAuth)</option>
+      <option value="spn" {% if form.auth_mode == 'spn' %}selected{% endif %}>Service principal</option>
+    </select></label>
+    <label>Tenant ID<input name="tenant_id" required value="{{ form.tenant_id|default('') }}"></label>
+    <label>Application ID<input name="client_id" required value="{{ form.client_id|default('') }}"></label>
+    <label class="js-fabric-spn" {% if form.auth_mode != 'spn' %}hidden{% endif %}>Client secret reference<input name="client_secret_ref" value="" placeholder="env://FABRIC_CLIENT_SECRET" {% if form.auth_mode != 'spn' %}disabled{% endif %}></label>
+  </div>
+  <p class="field-help">Save the source before signing in or testing its connection. OAuth uses the administrator's saved account. The operator must configure the application and a callback on the same console origin (use localhost consistently if that is registered).</p>
+</div>

@@ -39,6 +39,7 @@ _SQLGLOT_DIALECTS: dict[str, str] = {
     "snowflake": "snowflake",
     "bigquery": "bigquery",
     "mssql": "tsql",
+    "fabric_sql": "tsql",
     "sqlserver": "tsql",
 }
 
@@ -102,10 +103,18 @@ def normalize_sql(
         )
     if len(statements) > 1:
         return [
-            _normalize_expression(stmt, stmt.sql(dialect="postgres"), source_id, role_context)
+            _normalize_expression(
+                stmt,
+                stmt.sql(dialect="postgres"),
+                source_id,
+                role_context,
+                preserve_case=dialect == "tsql",
+            )
             for stmt in statements
         ]
-    return _normalize_expression(statements[0], sql, source_id, role_context)
+    return _normalize_expression(
+        statements[0], sql, source_id, role_context, preserve_case=dialect == "tsql"
+    )
 
 
 def _normalize_expression(
@@ -113,13 +122,19 @@ def _normalize_expression(
     original_sql: str,
     source_id: str,
     role_context: str | None,
+    *,
+    preserve_case: bool = False,
 ) -> NormalizedQuery:
     tables = _extract_tables(statement)
-    operation = _detect_operation(statement)
+    operation = (
+        "SELECT"
+        if preserve_case and isinstance(statement, exp.Query)
+        else _detect_operation(statement)
+    )
     normalized_tree = statement.copy()
     normalized_tree = _sort_and_conditions(normalized_tree)
     params = _replace_literals(normalized_tree)
-    normalized = normalized_tree.sql(dialect="postgres", normalize=True)
+    normalized = normalized_tree.sql(dialect="postgres", normalize=not preserve_case)
     fingerprint = _make_fingerprint(normalized, source_id, role_context)
     return NormalizedQuery(
         original_sql=original_sql,
@@ -163,6 +178,7 @@ def compute_cache_key(
     grants_version: str | None = None,
     policy_scope_hash: str | None = None,
     source_generation: int | None = None,
+    upstream_identity_scope: str | None = None,
 ) -> str:
     """Identity-aware cache key.
 
@@ -205,6 +221,10 @@ def compute_cache_key(
             policy_scope_hash or "",
         )
     )
+    if upstream_identity_scope is not None:
+        # Existing connectors retain v6 byte-for-byte. Fabric binds every tier
+        # to its authoritative saved principal/config and credential incarnation.
+        payload = sep.join(("v7", payload, upstream_identity_scope))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 

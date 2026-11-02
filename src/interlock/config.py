@@ -546,6 +546,70 @@ class NotificationConfig(BaseModel):
         return self
 
 
+class FabricSettings(BaseModel):
+    """Process settings; Fernet keys are resolved from operator secret references."""
+
+    model_config = _STRICT
+
+    active_key_version: str | None = Field(
+        default=None,
+        description="Active credential-encryption key version; absent disables Fabric services.",
+    )
+    key_refs: dict[str, str] = Field(
+        default_factory=dict,
+        description="Version-to-secret-reference map for active and retained Fernet keys.",
+    )
+    oauth_redirect_uri: str | None = Field(
+        default=None, description="Exact registered console origin plus /api/fabric/oauth/callback."
+    )
+    oauth_client_id: str | None = Field(
+        default=None, description="Explicit confidential Web application ID for saved-user OAuth."
+    )
+    oauth_client_secret_ref: str | None = Field(
+        default=None,
+        description="Secret reference for the confidential OAuth application credential.",
+    )
+    oauth_allowed_tenants: list[str] = Field(
+        default_factory=list, description="Explicit tenant IDs allowed for saved-user OAuth."
+    )
+    lock_timeout_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        le=120,
+        description="Deadline for credential pool/lock/auth lifecycle operations, in seconds.",
+    )
+    refresh_skew_seconds: int = Field(
+        default=120,
+        ge=0,
+        le=600,
+        description="Renew saved SQL access tokens this many seconds before expiry.",
+    )
+    max_concurrent_operations: int = Field(
+        default=8,
+        ge=1,
+        le=128,
+        description="Reserved concurrency setting; current transport uses eight active slots.",
+    )
+    max_waiting_operations: int = Field(
+        default=16,
+        ge=1,
+        le=1024,
+        description="Reserved queue setting; current transport allows sixteen waiting submissions.",
+    )
+
+    @model_validator(mode="after")
+    def validate_keyring(self) -> FabricSettings:
+        from interlock.connections.fabric.config import require_secret_reference
+
+        for ref in self.key_refs.values():
+            require_secret_reference(ref)
+        if self.oauth_client_secret_ref is not None:
+            require_secret_reference(self.oauth_client_secret_ref)
+        if self.active_key_version is not None and self.active_key_version not in self.key_refs:
+            raise ValueError("fabric.active_key_version must name a configured secret reference")
+        return self
+
+
 class ApprovalConfig(BaseModel):
     """Write-approval queue behaviour.
 
@@ -730,6 +794,10 @@ class InterLockConfig(BaseSettings):
     )
     notifications: NotificationConfig = Field(
         default_factory=NotificationConfig, description="Approval notifications."
+    )
+    fabric: FabricSettings = Field(
+        default_factory=FabricSettings,
+        description="Explicit Fabric SQL authentication and credential-encryption settings.",
     )
     approvals: ApprovalConfig = Field(
         default_factory=ApprovalConfig, description="Write approvals."

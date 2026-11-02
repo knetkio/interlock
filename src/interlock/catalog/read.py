@@ -14,6 +14,7 @@ from typing import Any
 
 from interlock.catalog.collectors import has_collector
 from interlock.catalog.model import PII_NAME_HINTS, TABLE_LIKE_NODE_TYPES, looks_like_pii
+from interlock.connections.connectors import connector_key_for
 
 # What the console lists per level before asking the admin to search instead.
 CHILD_LIMIT = 500
@@ -128,7 +129,7 @@ _SCAN_COLUMNS = """
 
 def connector_key_of(row: Any) -> str:
     metadata = _json(row["metadata"])
-    return str(metadata.get("connector_key") or metadata.get("provider") or row["source_type"])
+    return connector_key_for(str(row["source_type"]), metadata)
 
 
 async def source_status(pool: Any, source_id: str) -> SourceCatalogStatus | None:
@@ -264,7 +265,9 @@ async def search(
     args: list[Any] = []
     if query:
         args.append(f"%{query.lower()}%")
-        clauses.append(f"(lower(n.name) LIKE ${len(args)} OR n.resource_key LIKE ${len(args)})")
+        clauses.append(
+            f"(lower(n.name) LIKE ${len(args)} OR lower(n.resource_key) LIKE ${len(args)})"
+        )
     if source_id:
         args.append(source_id)
         clauses.append(f"n.source_id = ${len(args)}")

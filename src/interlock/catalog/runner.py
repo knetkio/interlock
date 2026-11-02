@@ -18,16 +18,20 @@ import contextlib
 import json
 import logging
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import asyncpg
 
 from interlock.catalog.collectors import CollectContext, collector_for
-from interlock.catalog.errors import classify_error
+from interlock.catalog.errors import CatalogScanError, classify_error
 from interlock.catalog.exposure import record_exposure
 from interlock.catalog.model import ScanLimits
 from interlock.catalog.store import apply_snapshot
 from interlock.config import CatalogConfig
+from interlock.connections.connectors import connector_key_for
+
+if TYPE_CHECKING:
+    from interlock.connections.fabric.runtime import FabricServices
 
 logger = logging.getLogger(__name__)
 
@@ -100,8 +104,10 @@ class CatalogScanRunner:
         conn_manager: Any,
         config: CatalogConfig,
         worker_id: str,
+        fabric_services: FabricServices | None = None,
         on_scanned: Callable[[str], Awaitable[Any]] | None = None,
     ) -> None:
+        self._fabric_services = fabric_services
         self._on_scanned = on_scanned
         self._pool = pg_pool
         self._registry = registry
@@ -228,7 +234,7 @@ class CatalogScanRunner:
             )
             return
 
-        connector_key = source.connector_key
+        connector_key = connector_key_for(source.connector_key)
         collector = collector_for(connector_key)
         if collector is None:
             await self._finish(
@@ -244,13 +250,26 @@ class CatalogScanRunner:
             connection_config=dict(source.connection_config),
             limits=scan_limits(self._config),
             conn_manager=self._conn_manager,
+            fabric_services=self._fabric_services,
         )
         lease = asyncio.create_task(self._renew_lease(scan_id))
         try:
             snapshot = await asyncio.wait_for(
                 collector(context), timeout=self._config.scan_timeout_seconds
             )
-            async with self._pool.acquire() as conn:
+            publication: Any
+            if connector_key == "fabric_sql":
+                binding = snapshot.publication_context
+                if binding is None or self._fabric_services is None:
+                    raise CatalogScanError(
+                        "stale_identity", "Fabric scan has no publication binding; retry scan"
+                    )
+                publication = self._fabric_services.store.guard_current(
+                    binding.context, binding.config
+                )
+            else:
+                publication = self._pool.acquire()
+            async with publication as conn:
                 result = await apply_snapshot(
                     conn,
                     source_id=source_id,
@@ -260,7 +279,16 @@ class CatalogScanRunner:
                 )
                 if result.added and not result.baseline:
                     try:
-                        await record_exposure(conn, source_id=source_id, scan_id=scan_id)
+                        await record_exposure(
+                            conn,
+                            source_id=source_id,
+                            scan_id=scan_id,
+                            case_sensitive=snapshot.source_attributes.get(
+                                "identifier_case_sensitive"
+                            )
+                            is True,
+                            native_identifiers=connector_key == "fabric_sql",
+                        )
                     except Exception:
                         logger.warning(
                             "Could not record drift exposure for scan %d", scan_id, exc_info=True
@@ -297,7 +325,15 @@ class CatalogScanRunner:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            code, message = classify_error(exc)
+            from interlock.connections.fabric.credentials import FabricCredentialError
+
+            if connector_key == "fabric_sql" and isinstance(exc, FabricCredentialError):
+                code, message = (
+                    "stale_identity",
+                    "Fabric identity changed during scan; retry with current credentials",
+                )
+            else:
+                code, message = classify_error(exc)
             logger.warning(
                 "Catalog scan %d of %s failed: %s", scan_id, source_id, code, exc_info=True
             )

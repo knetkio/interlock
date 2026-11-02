@@ -1,0 +1,16 @@
+# Opt in explicitly: docker compose -f docker-compose.yml -f docker-compose.fabric.yml up -d
+# Directory files are operator-managed; grant uid/gid 1000 read access, never commit them.
+x-fabric-volumes: &fabric-volumes
+  - type: bind
+    source: ${FABRIC_SECRET_DIRECTORY:?Set a private Fabric secrets directory}
+    target: /run/secrets/fabric
+    read_only: true
+services:
+  admin:
+    volumes: *fabric-volumes
+  gateway:
+    volumes: *fabric-volumes
+  worker-1:
+    volumes: *fabric-volumes
+  worker-2:
+    volumes: *fabric-volumes

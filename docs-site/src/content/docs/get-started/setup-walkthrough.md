@@ -241,6 +241,7 @@ The table below lists each connector's own keys. Secret-bearing keys are in
 | `generic_rest` | `http` | `base_url`, `auth_header`, **`token`** |
 | `s3` | `s3` | `bucket`, `prefix`, `region_name`, `endpoint_url`, **`aws_access_key_id`**, **`aws_secret_access_key`** |
 | `digitalocean_spaces` | `object_storage` | `bucket`, `prefix`, `region_name`, `endpoint_url`, **`aws_access_key_id`**, **`aws_secret_access_key`** |
+| `fabric_sql` | `database` | Exact Fabric `host`, `database`, `tenant_id`, `client_id`, `endpoint_type`, `auth_mode`; SPN requires **`client_secret_ref`**. Activate the beta connector first; [deployment, saved-user OAuth and acceptance limits](/guides/fabric-sql/). Native certification pending. |
 | `snowflake` | `warehouse` | `account`, `user`, `warehouse`, `database`, `schema`, `role`, `authenticator`, `application`, `collect_query_history`, **`password`**, **`private_key`** |
 | `slack` | `saas` | `workspace`, `channel_types`, `include_messages`, `include_threads`, `include_files`, `max_channels`, `max_messages_per_channel`, `max_replies_per_thread`, `max_files`, **`bot_token`** |
 | `github` | `saas` | `base_url`, `org`, `owner`, `repo_names`, `ref`, `include_code_paths`, `max_repos`, `max_issues_per_repo`, `max_prs_per_repo`, `max_releases_per_repo`, `max_workflows_per_repo`, **`token`** |

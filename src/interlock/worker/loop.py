@@ -10,7 +10,7 @@ import tempfile
 import time
 from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import asyncpg
 
@@ -19,6 +19,9 @@ from interlock.worker.extractors.base import ExtractedContent, ExtractionRegistr
 from interlock.worker.indexer import DocumentIndexer
 from interlock.worker.sampler import ContentSampler
 from interlock.worker.summarizer import DocumentSummarizer
+
+if TYPE_CHECKING:
+    from interlock.connections.fabric.runtime import FabricServices
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +143,10 @@ class IngestionWorker:
         concurrency: int = 1,
         lease_seconds: int = 300,
         max_lease_reclaims: int = 3,
+        *,
+        fabric_services: FabricServices | None = None,
     ) -> None:
+        self._fabric_services = fabric_services
         self._worker_id = worker_id
         self._pool = pg_pool
         self._redis = redis_client
@@ -456,6 +462,8 @@ class IngestionWorker:
         adapter = get_adapter(
             str(row["source_type"]),
             {"connector_key": connector_key or source_metadata.get("connector_key")},
+            fabric_services=self._fabric_services,
+            source_id=source_id,
         )
         data = await adapter.fetch_asset(connection_config, file_path)
         suffix = Path(file_path).suffix or ".txt"

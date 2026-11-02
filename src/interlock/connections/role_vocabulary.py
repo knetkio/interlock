@@ -27,7 +27,7 @@ from functools import cache
 from typing import Any, Literal
 
 from interlock.catalog.collectors import is_enforced
-from interlock.connections.connectors import CONNECTOR_DEFINITIONS
+from interlock.connections.connectors import CONNECTOR_DEFINITIONS, connector_key_for
 from interlock.core.source_roles import EVALUATED_CONSTRAINT_KEYS
 
 ConstraintType = Literal["list", "bool", "enum_list"]
@@ -737,6 +737,7 @@ def constraint_specs() -> tuple[ConstraintSpec, ...]:
 
 def vocabulary_for(connector_key: str) -> Vocabulary:
     """The vocabulary for a connector; an unknown key gets HTTP/REST's."""
+    connector_key = connector_key_for(connector_key)
     definition = CONNECTOR_DEFINITIONS.get(connector_key) or CONNECTOR_DEFINITIONS["generic_rest"]
     actions, types = _family_parts(definition.key, definition.family)
     actions = (*actions, *_DISCOVERY_ACTIONS)

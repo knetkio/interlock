@@ -28,6 +28,7 @@ from interlock.cache.strategy import CacheStrategyResolver
 from interlock.catalog.naming import CatalogNamingResolver
 from interlock.config import InterLockConfig, allows_insecure_upstream_tls, load_config
 from interlock.connections.circuit_breaker import CircuitBreakerRegistry
+from interlock.connections.fabric.runtime import build_fabric_services
 from interlock.connections.manager import ConnectionManager
 from interlock.core.approval_queue import ApprovalQueue
 from interlock.core.auth import AuthManager
@@ -445,6 +446,8 @@ async def lifespan(app: Starlette) -> AsyncIterator[None]:
     circuit_breakers = CircuitBreakerRegistry()
     app.state.circuit_breakers = circuit_breakers
 
+    fabric_services = build_fabric_services(pg_pool, config.fabric)
+    app.state.fabric_services = fabric_services
     conn_manager = ConnectionManager(
         registry,
         circuit_breakers=circuit_breakers,
@@ -452,6 +455,7 @@ async def lifespan(app: Starlette) -> AsyncIterator[None]:
         # one stored source cannot be refused on one protocol and served
         # on another.
         allow_insecure_upstream_tls=allows_insecure_upstream_tls(config),
+        fabric_services=fabric_services,
     )
     app.state.conn_manager = conn_manager
 
@@ -603,7 +607,7 @@ async def lifespan(app: Starlette) -> AsyncIterator[None]:
     app.state.source_role_evaluator = source_role_evaluator
 
     # How each SQL source resolves a bare table name, from the source catalog.
-    sql_naming_resolver = CatalogNamingResolver(pg_pool, registry)
+    sql_naming_resolver = CatalogNamingResolver(pg_pool, registry, fabric_services=fabric_services)
     await sql_naming_resolver.setup_listener()
     app.state.sql_naming_resolver = sql_naming_resolver
 
@@ -624,6 +628,7 @@ async def lifespan(app: Starlette) -> AsyncIterator[None]:
         registry=registry,
         cache_barrier_strict=cache_barrier_strict,
         notifier=approval_notifier,
+        fabric_services=fabric_services,
         expiry_sweep_interval_seconds=config.approvals.expiry_sweep_interval_seconds,
     )
     await approval_queue.start_expiry_task()
@@ -701,6 +706,8 @@ async def lifespan(app: Starlette) -> AsyncIterator[None]:
     await audit_buffer.shutdown()
     await instance_manager.stop()
     await conn_manager.close_all()
+    if fabric_services is not None:
+        await fabric_services.close()
     await close_redis_client(redis_client)
     await close_pg_pool(pg_pool)
 

@@ -14,7 +14,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 from urllib.parse import quote, unquote, urlparse, urlsplit
 
 import httpx
@@ -28,6 +28,9 @@ from interlock.security.egress import (
     validate_host_egress,
     validate_http_egress_url,
 )
+
+if TYPE_CHECKING:
+    from interlock.connections.fabric.runtime import FabricServices
 
 logger = logging.getLogger(__name__)
 
@@ -4035,8 +4038,15 @@ def get_connector(
 def get_adapter(
     key_or_source_type: str,
     metadata: dict[str, Any] | None = None,
+    *,
+    fabric_services: FabricServices | None = None,
+    source_id: str | None = None,
 ) -> BaseConnectorAdapter:
     definition = get_connector(key_or_source_type, metadata)
+    if definition.key == "fabric_sql":
+        from interlock.connections.fabric.adapter import FabricSQLAdapter
+
+        return FabricSQLAdapter(definition, fabric_services=fabric_services, source_id=source_id)
     factory = _ADAPTER_FACTORIES.get(definition.key, BaseConnectorAdapter)
     if isinstance(factory, tuple):
         cls, kwargs = factory
@@ -6690,6 +6700,40 @@ CONNECTOR_DEFINITIONS: dict[str, ConnectorDefinition] = {
             "reader": SAAS_READER,
             "blocked": BLOCKED,
         },
+    ),
+    "fabric_sql": ConnectorDefinition(
+        key="fabric_sql",
+        name="Microsoft Fabric SQL",
+        tier=1,
+        source_type="database",
+        family="database",
+        status="beta",
+        description="Fabric Warehouse, Lakehouse SQL analytics, and SQL Database via saved Entra identity.",
+        oss_libraries=("msal", "pyodbc", "sqlglot"),
+        credential_fields=(
+            "host",
+            "database",
+            "tenant_id",
+            "client_id",
+            "endpoint_type",
+            "auth_mode",
+            "client_secret_ref",
+            "port",
+            "connect_timeout_seconds",
+            "statement_timeout_seconds",
+            "max_rows",
+            "max_bytes",
+            "allow_private_egress",
+        ),
+        secret_fields=("client_secret_ref",),
+        capabilities=ConnectorCapabilities(
+            supports_query=True,
+            supports_discovery=True,
+            supports_write=True,
+            supports_field_permissions=True,
+        ),
+        default_cache_strategy="deterministic_first",
+        role_templates={"reader": DB_READ, "writer": DB_WRITE, "owner": OWNER, "blocked": BLOCKED},
     ),
     "mssql": ConnectorDefinition(
         key="mssql",

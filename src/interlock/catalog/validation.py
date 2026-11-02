@@ -96,7 +96,11 @@ async def load_catalog_view(pool: Any, source_id: str) -> CatalogView | None:
     for row in rows:
         columns = tables.setdefault(str(row["table_key"]), [])
         if row["column_name"] is not None:
-            columns.append(str(row["column_name"]).lower())
+            columns.append(
+                str(row["column_name"])
+                if connector_key == "fabric_sql"
+                else str(row["column_name"]).lower()
+            )
     config = source["connection_config"]
     if not isinstance(config, dict):
         import json
@@ -165,7 +169,9 @@ def lint_statements(view: CatalogView, statements: list[dict[str, Any]]) -> list
 
     candidates = view.candidates()
     for index, statement in enumerate(statements):
-        pattern = str(statement.get("resource_pattern") or "").strip().lower()
+        pattern = str(statement.get("resource_pattern") or "").strip()
+        if view.naming.identifier_case_sensitive is not True:
+            pattern = pattern.lower()
         if not pattern or not _is_sql_statement(statement):
             continue
         for finding in findings_for_statement(
@@ -184,7 +190,10 @@ def lint_statements(view: CatalogView, statements: list[dict[str, Any]]) -> list
                 )
             )
         if pattern not in {"*", "*.*"} and view.scanned and candidates:
-            if not any(fnmatch.fnmatchcase(candidate, pattern) for candidate in candidates):
+            if not any(
+                fnmatch.fnmatchcase(view.naming.identifier(candidate), pattern)
+                for candidate in candidates
+            ):
                 warnings.append(
                     LintWarning(
                         code="matches_nothing",
@@ -253,14 +262,16 @@ def lint_policy(
         )
     if view is None or not view.scanned:
         return warnings
-    known_tables = set(view.tables)
+    known_tables = {view.naming.identifier(t) for t in view.tables}
     bare_tables: dict[str, list[str]] = {}
     for table in known_tables:
         bare_tables.setdefault(table.rsplit(".", 1)[-1], []).append(table)
-    all_columns = {column for cols in view.tables.values() for column in cols}
+    all_columns = {
+        view.naming.identifier(column) for cols in view.tables.values() for column in cols
+    }
 
     for name in tables:
-        key = name.strip().lower()
+        key = view.naming.identifier(name.strip())
         if not key:
             continue
         if "." in key:
@@ -294,7 +305,7 @@ def lint_policy(
             )
     for field_name, names in (("columns", columns), ("redact_columns", redact_columns)):
         for name in names:
-            last = name.strip().lower().rsplit(".", 1)[-1]
+            last = view.naming.identifier(name.strip()).rsplit(".", 1)[-1]
             if last and last not in all_columns:
                 warnings.append(
                     LintWarning(

@@ -20,6 +20,7 @@ from interlock.core.sql_columns import ColumnAccess, column_access
 from interlock.core.sql_governance import (
     governance_inputs,
     legacy_naming,
+    naming_for,
     resolve_table,
     table_spellings,
 )
@@ -164,6 +165,8 @@ class GatewayDecision:
     # Output column -> the base columns it derives from, so `redact_columns`
     # follows `SELECT ssn AS x` to `ssn`.
     column_lineage: dict[str, set[str]] = field(default_factory=dict)
+    identifier_case_sensitive: bool | None = None
+    upstream_identity: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -232,6 +235,7 @@ class GatewayPipeline:
         *,
         bearer_token: str | None = None,
         require_auth: bool | None = None,
+        approval_accepted: bool = False,
     ) -> GatewayDecision:
         """Resolve identity, rate limit, and evaluate policy."""
         identity = request.identity
@@ -305,6 +309,7 @@ class GatewayPipeline:
                 sql=request.sql,
                 deny_table_spellings=view.deny_table_spellings,
                 deny_column_spellings=view.deny_column_spellings,
+                identifier_case_sensitive=view.metadata.get("fabric_identifier_case_sensitive"),
             )
             if not policy_decision.allowed:
                 return GatewayDecision(
@@ -327,6 +332,34 @@ class GatewayPipeline:
                 )
         else:
             policy_decision = None
+
+        if (
+            "fabric_identifier_case_sensitive" in governance_metadata
+            and governance_operation == "read"
+            and request.sql
+            and policy_decision is not None
+            and policy_decision.redact_columns
+            and (view.permission_request.column_gaps or not view.column_lineage)
+        ):
+            # A whole-table grant can accept unresolved columns, but cannot
+            # establish that aliased output is safe under named redaction.
+            # Constants and COUNT have resolved outputs with empty source sets.
+            return GatewayDecision(
+                allowed=False,
+                status_code=403,
+                reason="Fabric policy redaction requires resolved output column lineage",
+                identity=identity,
+                policy_decision=policy_decision,
+                rate_limit_result=rate_result,
+                source_role_decision=source_role_decision,
+                audit_metadata=_governance_metadata(
+                    source_role_decision=source_role_decision,
+                    permission_request=view.permission_request,
+                    policy_decision=policy_decision,
+                    identity=identity,
+                    source_id=request.source_id,
+                ),
+            )
 
         if identity is not None and self._rate_limiter is not None:
             rate_result = await self._check_rate_limit(
@@ -360,6 +393,7 @@ class GatewayPipeline:
             identity,
             classification=write_classification,
             policy_decision=policy_decision,
+            approval_accepted=approval_accepted,
         )
         if write_decision is not None:
             write_decision.identity = identity
@@ -383,6 +417,12 @@ class GatewayPipeline:
         decision = GatewayDecision(
             allowed=True,
             column_lineage=view.column_lineage,
+            identifier_case_sensitive=view.metadata.get("fabric_identifier_case_sensitive"),
+            upstream_identity=(
+                request.metadata.get("upstream_identity")
+                if request.metadata.get("connector_key") == "fabric_sql"
+                else None
+            ),
             identity=identity,
             policy_decision=policy_decision,
             rate_limit_result=rate_result,
@@ -454,6 +494,7 @@ class GatewayPipeline:
         *,
         classification: WriteClassification | None = None,
         policy_decision: PolicyDecision | None = None,
+        approval_accepted: bool = False,
     ) -> GatewayDecision | None:
         if request.operation != "write" and classification is None:
             return None
@@ -506,7 +547,7 @@ class GatewayPipeline:
                 audit_metadata={"write_classification": _write_metadata(classification)},
             )
 
-        if risk_level not in (RiskLevel.HIGH, RiskLevel.MEDIUM):
+        if approval_accepted or risk_level not in (RiskLevel.HIGH, RiskLevel.MEDIUM):
             return None
 
         if self._approval_queue is None:
@@ -537,6 +578,8 @@ class GatewayPipeline:
             "normalized_operation": classification.operation_type,
             **request.metadata,
         }
+        if request.metadata.get("connector_key") == "fabric_sql":
+            metadata["parameters"] = (request.parameters or {}).get("parameters") or []
         try:
             submitted = await self._approval_queue.submit(
                 identity_id=identity.identity_id,
@@ -583,20 +626,44 @@ class GatewayPipeline:
             write_classification=write_classification,
         )
         naming = await self._naming_for(request)
+        if naming is not None and naming.connector_key == "fabric_sql":
+            metadata["fabric_identifier_case_sensitive"] = naming.identifier_case_sensitive
+        else:
+            metadata.pop("fabric_identifier_case_sensitive", None)
         columns = request.columns
         column_gaps: dict[str, str] = {}
         lineage: dict[str, set[str]] = {}
         deny_columns: set[str] | None = None
+        scope_refusals: list[str] = []
         if request.sql and naming is not None and not request.columns:
             access = column_access(
                 request.sql,
                 dialect=naming.dialect,
                 resolve=lambda written: resolve_table(written, naming).canonical,
                 catalog=naming.columns,
+                case_sensitive=naming.connector_key == "fabric_sql"
+                and naming.identifier_case_sensitive is not False,
+                native_identifiers=naming.connector_key == "fabric_sql",
             )
+            scope_refusals = access.refusals
             columns, column_gaps = _column_resources(access)
             lineage = access.lineage
             deny_columns = _column_spellings(access)
+        if (
+            naming is not None
+            and naming.connector_key == "fabric_sql"
+            and write_classification is not None
+        ):
+            for table in tables or []:
+                resolved = resolve_table(table, naming)
+                pair = tuple(resolved.canonical.split("."))
+                if (
+                    len(pair) != 2
+                    or (naming.relation_types or {}).get((pair[0], pair[1])) != "table"
+                ):
+                    scope_refusals.append(
+                        "Fabric writes require a catalog-verified table target; views and unknown relation types are unsupported"
+                    )
         permission_request = build_permission_request(
             protocol=request.protocol,
             source_id=request.source_id,
@@ -612,6 +679,7 @@ class GatewayPipeline:
             naming=naming,
             column_gaps=column_gaps,
         )
+        permission_request.naming_refusals.extend(scope_refusals)
         spellings = (
             table_spellings([resolve_table(table, naming or legacy_naming()) for table in tables])
             if tables
@@ -630,17 +698,22 @@ class GatewayPipeline:
 
     async def _naming_for(self, request: GatewayRequest) -> Any | None:
         """How this source's database resolves table names, when it speaks SQL."""
+        fallback = (
+            naming_for("fabric_sql")
+            if request.metadata.get("connector_key") == "fabric_sql"
+            else None
+        )
         if self._sql_naming is None or not (request.sql or request.tables):
-            return None
+            return fallback
         try:
-            return await self._sql_naming.naming_for_source(request.source_id)
+            return await self._sql_naming.naming_for_source(request.source_id) or fallback
         except Exception:
             logger.warning(
-                "SQL naming unavailable for %s; using legacy naming",
+                "SQL naming unavailable for %s; using connector fallback",
                 request.source_id,
                 exc_info=True,
             )
-            return None
+            return fallback
 
     def _classify_write(self, request: GatewayRequest) -> WriteClassification | None:
         if request.sql and self._write_classifier is not None:

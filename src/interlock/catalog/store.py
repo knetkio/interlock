@@ -133,13 +133,23 @@ async def apply_snapshot(
             elif row["attributes_hash"] != node.attributes_hash:
                 changed.append((row, node))
 
+        prior_root = existing.get(())
+        prior_attributes = (
+            _existing_view(prior_root)["attributes"] if prior_root is not None else {}
+        )
+        binding = snapshot.source_attributes.get("upstream_identity")
+        identity_changed = binding is not None and binding != prior_attributes.get(
+            "upstream_identity"
+        )
+        # Truncation retains unseen nodes only within the same upstream epoch.
+        # Tombstones retain history/annotations when the saved identity changes.
         removed = [
             row
             for path, row in existing.items()
             if row["removed_at"] is None
             and path not in by_path
             and path != ()
-            and snapshot.is_complete_under(path)
+            and (identity_changed or snapshot.is_complete_under(path))
         ]
 
         await conn.execute("""

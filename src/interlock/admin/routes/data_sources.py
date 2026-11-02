@@ -15,7 +15,7 @@ from interlock.admin.audit import (
     summarize_admin_resource,
 )
 from interlock.admin.catalog_hooks import after_source_saved
-from interlock.admin.source_cache import invalidate_source_cache
+from interlock.admin.source_cache import invalidate_source_cache, notify_source_change
 from interlock.admin.source_ids import (
     InvalidSourceIdError,
     generate_source_id,
@@ -100,9 +100,7 @@ def _row_to_dict(row) -> dict[str, Any]:  # asyncpg.Record
 
 
 async def _notify(request: Request, channel: str = "onyx_config_changed") -> None:
-    pool = request.app.state.pg_pool
-    async with pool.acquire() as conn:
-        await conn.execute(f"NOTIFY {channel}")
+    await notify_source_change(request, channel)
 
 
 # ---------------------------------------------------------------------------
@@ -163,6 +161,12 @@ async def test_connection(
     from interlock.connections.manager import ConnectionManager
 
     requested = body.connector_key or get_connector(body.source_type).key
+    if requested == "fabric_sql":
+        return {
+            "ok": False,
+            "latency_ms": 0,
+            "error": "Save the Fabric source before testing its connection",
+        }
     try:
         await require_active(request.app.state.pg_pool, requested)
     except ConnectorNotActiveError as exc:
@@ -199,12 +203,17 @@ async def test_registered_source(source_id: str, request: Request) -> dict[str, 
     if isinstance(meta, str):
         meta = json.loads(meta)
     connector = get_connector(row["source_type"], meta)
-    status = await ConnectionManager.probe_unsaved(
-        row["source_type"],
-        cfg or {},
-        connector_key=connector.key,
-        allow_insecure_tls=allows_insecure_upstream_tls(request.app.state.config),
-    )
+    if connector.key == "fabric_sql":
+        from interlock.admin.routes.fabric_auth import probe_saved
+
+        status = await probe_saved(request, source_id, cfg or {})
+    else:
+        status = await ConnectionManager.probe_unsaved(
+            row["source_type"],
+            cfg or {},
+            connector_key=connector.key,
+            allow_insecure_tls=allows_insecure_upstream_tls(request.app.state.config),
+        )
     return {
         "ok": status.healthy,
         "latency_ms": status.latency_ms,

@@ -53,7 +53,9 @@ def _json(value: Any) -> dict[str, Any]:
 
 def _connector_key(row: Any) -> str:
     metadata = _json(row["metadata"])
-    return str(metadata.get("connector_key") or metadata.get("provider") or row["source_type"])
+    from interlock.connections.connectors import connector_key_for
+
+    return connector_key_for(str(row["source_type"]), metadata)
 
 
 def findings_for_statement(
@@ -65,6 +67,8 @@ def findings_for_statement(
     pattern: str,
 ) -> list[NamingFinding]:
     """What catalog naming changes about one role statement."""
+    if naming.connector_key == "fabric_sql":
+        return []
     lowered = pattern.strip().lower()
     if not lowered.startswith(f"{LEGACY_SCHEMA}.") or naming.default_schema == LEGACY_SCHEMA:
         return []

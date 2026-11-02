@@ -36,6 +36,7 @@ from interlock.catalog.naming import CatalogNamingResolver
 from interlock.catalog.queue import enqueue_many
 from interlock.config import InterLockConfig, allows_insecure_upstream_tls, load_config
 from interlock.connections.circuit_breaker import CircuitBreakerRegistry
+from interlock.connections.fabric.runtime import build_fabric_services
 from interlock.connections.manager import ConnectionManager
 from interlock.core.approval_queue import ApprovalQueue
 from interlock.core.oidc import OIDCProvider
@@ -265,8 +266,12 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     await registry.load()
     await registry.setup_listener()
     app.state.registry = registry
+    fabric_services = build_fabric_services(app.state.pg_pool, config.fabric)
+    app.state.fabric_services = fabric_services
     # The dry-runs resolve SQL names exactly as the gateway does.
-    sql_naming_resolver = CatalogNamingResolver(app.state.pg_pool, registry)
+    sql_naming_resolver = CatalogNamingResolver(
+        app.state.pg_pool, registry, fabric_services=fabric_services
+    )
     await sql_naming_resolver.setup_listener()
     app.state.sql_naming_resolver = sql_naming_resolver
     # The signing key was resolved once in create_app() and stored on
@@ -364,6 +369,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         # one stored source cannot be refused on one protocol and served
         # on another.
         allow_insecure_upstream_tls=allows_insecure_upstream_tls(config),
+        fabric_services=fabric_services,
     )
     app.state.conn_manager = conn_manager
     # The Admin resolves approvals, so it emits the approved, rejected and
@@ -377,6 +383,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         cache_invalidator=cache_invalidator,
         registry=registry,
         notifier=approval_notifier,
+        fabric_services=fabric_services,
         expiry_sweep_interval_seconds=config.approvals.expiry_sweep_interval_seconds,
     )
     app.state.approval_queue = approval_queue
@@ -418,6 +425,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         if approval_notifier is not None:
             await approval_notifier.aclose()
         await conn_manager.close_all()
+        if fabric_services is not None:
+            await fabric_services.close()
         await close_pg_pool(app.state.pg_pool)
         await close_redis_client(app.state.redis)
 
@@ -456,6 +465,8 @@ def create_app(config: InterLockConfig | None = None) -> FastAPI:
     from interlock.admin.routes.dashboard import router as dashboard_router
     from interlock.admin.routes.dashboard_admin_users import router as admin_users_pages_router
     from interlock.admin.routes.data_sources import router as ds_router
+    from interlock.admin.routes.fabric_auth import install_callback_log_redaction
+    from interlock.admin.routes.fabric_auth import router as fabric_router
     from interlock.admin.routes.identities import router as id_router
     from interlock.admin.routes.ingestion import router as ingestion_router
     from interlock.admin.routes.oidc_mappings import router as oidc_mappings_router
@@ -464,6 +475,8 @@ def create_app(config: InterLockConfig | None = None) -> FastAPI:
 
     app.include_router(auth_router)
     app.include_router(password_router)
+    install_callback_log_redaction()
+    app.include_router(fabric_router)
     app.include_router(ds_router)
     app.include_router(pol_router)
     app.include_router(id_router)

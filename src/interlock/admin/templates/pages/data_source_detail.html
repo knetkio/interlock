@@ -5,10 +5,13 @@
 <div class="page-header">
   <a href="/dashboard/data-sources" class="back-link"
      hx-get="/dashboard/data-sources" hx-target="#main-content">← Data Sources</a>
-  <h1>{{ ds.name or ds.source_id }}</h1>
+  <h1>{% if ds.connector_key == 'fabric_sql' %}<img src="/static/assets/connectors/fabric.svg" width="24" height="24" alt="Microsoft Fabric"> {% endif %}{{ ds.name or ds.source_id }}</h1>
 </div>
 
 <div class="detail-stack">
+{% if ds.connector_key == 'fabric_sql' %}
+{% with fabric_auth=ds.fabric_auth, fabric_oauth_ready=ds.fabric_oauth_ready %}{% include "partials/fabric_auth_controls.html" %}{% endwith %}
+{% endif %}
 
   <section class="card">
     <div class="section-header-row">
@@ -38,7 +41,7 @@
       <dt>Name</dt><dd>{{ ds.name }}</dd>
       <dt>Source ID</dt><dd><code>{{ ds.source_id }}</code>
         <button class="btn btn-link js-copy-text" type="button" data-copy-text="{{ ds.source_id }}">Copy</button>
-        <span class="field-help">What agents use to reach this source: the PostgreSQL database name, the <code>/proxy/{{ ds.source_id }}/</code> path, and the MCP <code>source_id</code>.</span></dd>
+        <span class="field-help">{% if ds.connector_key == 'fabric_sql' %}Agents reach Fabric through MCP using this <code>source_id</code>.{% else %}What agents use to reach this source: the PostgreSQL database name, the <code>/proxy/{{ ds.source_id }}/</code> path, and the MCP <code>source_id</code>.{% endif %}</span></dd>
       <dt>Type</dt><dd><span class="badge badge-{{ ds.source_type|lower }}">{{ ds.source_type }}</span></dd>
       <dt>Connector</dt><dd>{{ ds.connector_name }} <code>{{ ds.connector_key }}</code>{% if ds.connector_active is sameas false %} <span class="badge badge-warning" title="This source keeps working; new sources cannot be registered on this connector until it is activated.">connector inactive</span>{% endif %}</dd>
       <dt>Family</dt><dd>{{ ds.connector_family }}</dd>

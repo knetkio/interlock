@@ -129,3 +129,20 @@ observability:
   # such as "http://otel-collector:4318" in production.
   otlp_endpoint: null
   instrument_asgi: true
+
+# Fabric remains disabled until an active version and explicit key refs exist.
+# Supply the identical settings to admin, gateway, and workers. See /guides/fabric-sql/.
+fabric:
+  active_key_version: null
+  key_refs: {}
+  oauth_client_id: null
+  oauth_redirect_uri: null
+  oauth_client_secret_ref: null
+  oauth_allowed_tenants: []
+  # To enable (real files belong outside the checkout):
+  # active_key_version: "v1"
+  # key_refs: {v1: "file:///run/secrets/fabric/key-v1"}
+  # oauth_client_id: "YOUR-APP-ID"
+  # oauth_redirect_uri: "https://console.example/api/fabric/oauth/callback"
+  # oauth_client_secret_ref: "file:///run/secrets/fabric/oauth-client-secret"
+  # oauth_allowed_tenants: ["YOUR-TENANT-ID"]

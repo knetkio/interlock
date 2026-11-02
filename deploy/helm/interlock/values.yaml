@@ -237,3 +237,16 @@ ingress:
         - path: /
           pathType: Prefix
   tls: []
+
+# Disabled unless versioned keys and an existing operator-managed Secret are supplied.
+# Secret keys: key-<version>, optional OAuth secret key, and any SPN keys referenced
+# with file:///run/secrets/fabric/<key>. All three processes receive the same mount.
+fabric:
+  enabled: false
+  existingSecret: ""
+  activeKeyVersion: ""
+  keyVersions: []
+  oauthClientId: ""
+  oauthRedirectUri: ""
+  oauthAllowedTenants: []
+  oauthClientSecretKey: ""

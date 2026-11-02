@@ -71,6 +71,20 @@ class SourceRoleEvaluator:
                 missing_permissions=[_missing(request)],
             )
 
+        fabric_names = (
+            request.protocol == "fabric_sql"
+            or "fabric_identifier_case_sensitive" in request.metadata
+        )
+        if fabric_names and any(
+            _unsupported_fabric_pattern(s.resource_pattern, request.resource_case_sensitive)
+            for s in statements
+        ):
+            return SourceRoleDecision(
+                allowed=False,
+                explicit_deny=True,
+                reason="Unsupported Fabric permission identifier equivalence",
+            )
+
         if request.naming_refusals:
             return SourceRoleDecision(
                 allowed=False,
@@ -83,7 +97,7 @@ class SourceRoleEvaluator:
             scoped = [
                 stmt
                 for stmt in statements
-                if _is_column_scoped_on(stmt, table)
+                if _is_column_scoped_on(stmt, table, case_sensitive=request.resource_case_sensitive)
                 and _action_matches(stmt.action, request.action)
             ]
             if any(stmt.effect == "deny" for stmt in scoped):
@@ -190,6 +204,8 @@ class SourceRoleEvaluator:
         resource_type: str,
         resources: list[str],
         aliases: dict[str, list[str]] | None = None,
+        case_sensitive: bool = False,
+        native_identifiers: bool = False,
     ) -> set[str]:
         """Which of `resources` this identity's roles allow for `action`.
 
@@ -201,7 +217,12 @@ class SourceRoleEvaluator:
         without naming anything it may not.
         """
         statements = await self._load_statements(identity_id, source_id)
-        if not statements:
+        if not statements or (
+            native_identifiers
+            and any(
+                _unsupported_fabric_pattern(s.resource_pattern, case_sensitive) for s in statements
+            )
+        ):
             return set()
         probe = PermissionRequest(
             protocol="mcp",
@@ -209,6 +230,7 @@ class SourceRoleEvaluator:
             identity_id=identity_id,
             action=action,
             resource_type=resource_type,
+            resource_case_sensitive=case_sensitive,
         )
         allowed: set[str] = set()
         for resource in resources:
@@ -297,6 +319,13 @@ def build_permission_request(
         columns=columns,
         resolved=resolved,
     )
+    refusals = [t.refusal for t in resolved or [] if t.refusal]
+    if naming is not None and naming.connector_key == "fabric_sql":
+        if any(
+            c != c.strip() or (naming.identifier_case_sensitive is False and not c.isascii())
+            for c in columns or []
+        ):
+            refusals.append("Unsupported Fabric column identifier equivalence")
     schemas = sorted({resource.split(".", 1)[0] for resource in resources if "." in resource})
     return PermissionRequest(
         protocol=protocol,
@@ -314,9 +343,12 @@ def build_permission_request(
         risk_level=risk_level,
         metadata=metadata or {},
         resource_variants=variants,
-        naming_refusals=[t.refusal for t in resolved or [] if t.refusal],
+        naming_refusals=refusals,
         naming_resolved=None if resolved is None else all(t.resolved for t in resolved),
         column_gaps=dict(column_gaps or {}),
+        resource_case_sensitive=naming is not None
+        and naming.connector_key == "fabric_sql"
+        and naming.identifier_case_sensitive is not False,
     )
 
 
@@ -326,11 +358,21 @@ def statements_allow(
     action: str,
     resource_type: str,
     resource: str,
+    case_sensitive: bool = False,
+    native_identifiers: bool = False,
 ) -> bool:
     """Whether these statements allow `action` on `resource`: an allow matches
     and no deny does - the evaluator's rule for one resource."""
+    if native_identifiers and any(
+        _unsupported_fabric_pattern(s.resource_pattern, case_sensitive) for s in statements
+    ):
+        return False
     probe = PermissionRequest(
-        protocol="mcp", source_id="", action=action, resource_type=resource_type
+        protocol="mcp",
+        source_id="",
+        action=action,
+        resource_type=resource_type,
+        resource_case_sensitive=case_sensitive,
     )
     matching = [s for s in statements if _matches_statement(s, probe, resource)]
     return any(s.effect == "allow" for s in matching) and not any(
@@ -547,7 +589,12 @@ def _column_suffixes(
     """
     if not columns:
         return ["*"]
-    names = {table.written.lower(), table.canonical, table.canonical.rsplit(".", 1)[-1]}
+    normalize = (lambda value: value) if table.case_sensitive else str.lower
+    names = {
+        normalize(table.written),
+        normalize(table.canonical),
+        normalize(table.canonical.rsplit(".", 1)[-1]),
+    }
     mine: list[str] = []
     for column in columns:
         column = column.strip()
@@ -555,7 +602,7 @@ def _column_suffixes(
             continue
         owner, _, name = column.rpartition(".")
         if owner:
-            if owner.lower() in names:
+            if normalize(owner) in names:
                 mine.append(name)
         else:
             mine.append(column)
@@ -584,18 +631,26 @@ def _matches_statement(
         return False
     if not _resource_type_matches(stmt.resource_type, request):
         return False
-    if not _resource_matches(stmt.resource_pattern, resource):
+    if not _resource_matches(
+        stmt.resource_pattern, resource, case_sensitive=request.resource_case_sensitive
+    ):
         return False
     return _constraints_match(stmt.constraints, request)
 
 
-def _is_column_scoped_on(stmt: PermissionStatement, table: str) -> bool:
+def _is_column_scoped_on(
+    stmt: PermissionStatement, table: str, *, case_sensitive: bool = False
+) -> bool:
     """Whether a statement names columns of `table` rather than the whole table."""
-    parts = _normalize_resource_pattern(stmt.resource_pattern).split(".")
+    parts = _normalize_resource_pattern(stmt.resource_pattern, case_sensitive=case_sensitive).split(
+        "."
+    )
     column_scoped = stmt.resource_type == "db.column" or (len(parts) >= 3 and parts[-1] != "*")
     if not column_scoped or len(parts) < 3:
         return False
-    return fnmatch.fnmatchcase(table, ".".join(parts[:-1]))
+    return fnmatch.fnmatchcase(
+        _normalize_resource_pattern(table, case_sensitive=case_sensitive), ".".join(parts[:-1])
+    )
 
 
 def _action_matches(pattern: str, action: str) -> bool:
@@ -690,9 +745,15 @@ def _resource_type_from_action(
     return "db.table"
 
 
-def _resource_matches(pattern: str, resource: str) -> bool:
-    normalized_pattern = _normalize_resource_pattern(pattern)
-    normalized_resource = _normalize_resource_pattern(resource)
+def _unsupported_fabric_pattern(pattern: str, case_sensitive: bool) -> bool:
+    return any(part != part.strip() for part in pattern.split(".")) or (
+        not case_sensitive and not pattern.isascii()
+    )
+
+
+def _resource_matches(pattern: str, resource: str, *, case_sensitive: bool = False) -> bool:
+    normalized_pattern = _normalize_resource_pattern(pattern, case_sensitive=case_sensitive)
+    normalized_resource = _normalize_resource_pattern(resource, case_sensitive=case_sensitive)
     return (
         normalized_pattern == "*"
         or fnmatch.fnmatchcase(normalized_resource, normalized_pattern)
@@ -700,9 +761,9 @@ def _resource_matches(pattern: str, resource: str) -> bool:
     )
 
 
-def _normalize_resource_pattern(value: str) -> str:
+def _normalize_resource_pattern(value: str, *, case_sensitive: bool = False) -> str:
     value = value.strip()
-    if value.startswith("/"):
+    if case_sensitive or value.startswith("/"):
         return value
     return value.lower()
 

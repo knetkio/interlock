@@ -10,9 +10,13 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from interlock.catalog.model import CatalogSnapshot, ScanLimits
+from interlock.connections.connectors import connector_key_for
+
+if TYPE_CHECKING:
+    from interlock.connections.fabric.runtime import FabricServices
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +28,7 @@ class CollectContext:
     connection_config: dict[str, Any]
     limits: ScanLimits
     conn_manager: Any = None
+    fabric_services: FabricServices | None = None
 
 
 Collector = Callable[[CollectContext], Awaitable[CatalogSnapshot]]
@@ -32,6 +37,7 @@ Collector = Callable[[CollectContext], Awaitable[CatalogSnapshot]]
 def _registry() -> dict[str, Collector]:
     # Imported lazily so that importing the catalog package does not pull in
     # every driver.
+    from interlock.catalog.collectors.fabric import collect_fabric
     from interlock.catalog.collectors.mysql import collect_mysql
     from interlock.catalog.collectors.postgres import collect_postgres
     from interlock.catalog.collectors.services import (
@@ -45,6 +51,7 @@ def _registry() -> dict[str, Collector]:
     from interlock.catalog.collectors.snowflake import collect_snowflake
 
     return {
+        "fabric_sql": collect_fabric,
         "postgresql": collect_postgres,
         "mysql": collect_mysql,
         "mariadb": collect_mysql,
@@ -63,19 +70,19 @@ def _registry() -> dict[str, Collector]:
 # Connectors whose catalogued structure the gateway enforces on agent paths.
 # Everything else a collector records is inventory: visible to the admin and to
 # role authors, but not yet a boundary an agent request is checked against.
-ENFORCED_CONNECTOR_KEYS = frozenset({"postgresql", "mysql", "mariadb", "snowflake"})
+ENFORCED_CONNECTOR_KEYS = frozenset({"postgresql", "mysql", "mariadb", "snowflake", "fabric_sql"})
 
 
 def is_enforced(connector_key: str) -> bool:
-    return connector_key in ENFORCED_CONNECTOR_KEYS
+    return connector_key_for(connector_key) in ENFORCED_CONNECTOR_KEYS
 
 
 def collector_for(connector_key: str) -> Collector | None:
-    return _registry().get(connector_key)
+    return _registry().get(connector_key_for(connector_key))
 
 
 def has_collector(connector_key: str) -> bool:
-    return connector_key in _registry()
+    return connector_key_for(connector_key) in _registry()
 
 
 def collector_keys() -> frozenset[str]:

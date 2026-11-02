@@ -31,7 +31,7 @@ from interlock.admin.policy_summary import (
 )
 from interlock.admin.policy_summary import as_dict as as_policy_dict
 from interlock.admin.roles import is_console_admin, is_read_only
-from interlock.admin.source_cache import invalidate_source_cache
+from interlock.admin.source_cache import invalidate_source_cache, notify_source_change
 from interlock.admin.source_ids import (
     InvalidSourceIdError,
     generate_source_id,
@@ -419,7 +419,31 @@ def _blank_source_metadata() -> dict[str, Any]:
     return {"source_roles_version": 1}
 
 
+def _fabric_form_config(form: Any) -> dict[str, Any]:
+    cfg = {
+        key: str(form.get(key) or "").strip()
+        for key in ("host", "database", "tenant_id", "client_id", "endpoint_type", "auth_mode")
+    }
+    if cfg["auth_mode"] == "spn":
+        cfg["client_secret_ref"] = str(form.get("client_secret_ref") or "").strip()
+    return cfg
+
+
+def _fabric_refusal(connector_key: str, cfg: dict[str, Any]) -> str | None:
+    if connector_key != "fabric_sql":
+        return None
+    from interlock.connections.fabric.config import FabricConfig
+
+    try:
+        FabricConfig.from_mapping(cfg)
+    except ValueError:
+        return "Complete the Fabric server, database, endpoint and authentication settings using a valid secret reference for service principals."
+    return None
+
+
 def _connector_config_from_form(connector_key: str, form: Any) -> dict[str, Any]:
+    if connector_key == "fabric_sql":
+        return _fabric_form_config(form)
     definition = get_connector(connector_key)
     allowed = set(definition.credential_fields) | {
         "base_url",
@@ -4041,6 +4065,16 @@ async def test_new_data_source(
             "partials/connection_test_result.html",
             {"ok": False, "latency_ms": 0.0, "error": inactive},
         )
+    if connector.key == "fabric_sql":
+        return _render(
+            request,
+            "partials/connection_test_result.html",
+            {
+                "ok": False,
+                "latency_ms": 0.0,
+                "error": "Save the Fabric source before testing its connection",
+            },
+        )
     if source_type in {"postgresql", "mysql"} or connector.family == "database":
         cfg = {"host": host, "port": port}
         if database:
@@ -4118,7 +4152,9 @@ async def create_data_source_form(
         **source_metadata_for_connector(connector.key),
     }
 
-    if source_type in {"postgresql", "mysql"} or connector.family == "database":
+    if connector.key == "fabric_sql":
+        cfg = _fabric_form_config(form)
+    elif source_type in {"postgresql", "mysql"} or connector.family == "database":
         cfg = {"host": host, "port": port}
         if database:
             cfg["database"] = database
@@ -4145,9 +4181,11 @@ async def create_data_source_form(
 
     # An inactive connector, a TLS posture production would refuse, then the id:
     # generated from the display name unless a caller supplied one.
-    refusal = await _inactive_connector_error(
-        pool, connector_key or connector.key
-    ) or _console_tls_refusal(request, connector.source_type, cfg)
+    refusal = (
+        await _inactive_connector_error(pool, connector_key or connector.key)
+        or _fabric_refusal(connector.key, cfg)
+        or _console_tls_refusal(request, connector.source_type, cfg)
+    )
     existing = None
     if not refusal:
         source_id = source_id.strip()
@@ -4187,6 +4225,11 @@ async def create_data_source_form(
                     "ssl_ca": str(form.get("ssl_ca") or ""),
                     "cache_strategy": cache_strategy,
                     "create_default_roles": create_default_roles,
+                    **(
+                        {key: value for key, value in cfg.items() if key != "client_secret_ref"}
+                        if connector.key == "fabric_sql"
+                        else {}
+                    ),
                 },
                 "connector_groups": await active_connector_groups(request.app.state.pg_pool),
                 "connectors": CONNECTOR_DEFINITIONS,
@@ -4796,6 +4839,8 @@ async def policy_dry_run(
     }
     connector = get_connector(source_type, source_metadata)
     deny_spellings: set[str] | None = None
+    deny_column_spellings: set[str] | None = None
+    identifier_case_sensitive: bool | None = None
     if sql and connector.key in _SQL_DRY_RUN_CONNECTORS:
         # The gateway's own derivation - verb, every statement's tables, write
         # classification, catalog naming - so the dry-run explains the decision
@@ -4806,7 +4851,7 @@ async def policy_dry_run(
                 protocol=source_type,
                 source_id=source_id,
                 dialect=dialect_for(connector.key),
-                metadata={"query": sql, **dry_run_metadata},
+                metadata={"query": sql, "connector_key": connector.key, **dry_run_metadata},
             ),
             identity_id=identity.identity_id,
         )
@@ -4815,6 +4860,8 @@ async def policy_dry_run(
         table_list = list(view.tables or [])
         column_list = permission_request.columns
         deny_spellings = view.deny_table_spellings
+        deny_column_spellings = view.deny_column_spellings
+        identifier_case_sensitive = view.metadata.get("fabric_identifier_case_sensitive")
     elif sql:
         permission_request = get_adapter(
             connector.key,
@@ -4823,7 +4870,7 @@ async def policy_dry_run(
             source_id=source_id,
             identity_id=identity.identity_id,
             operation=sql,
-            metadata={"query": sql, **dry_run_metadata},
+            metadata={"query": sql, "connector_key": connector.key, **dry_run_metadata},
         )
         operation = (
             "read"
@@ -4853,6 +4900,8 @@ async def policy_dry_run(
         )
         permission_request = view.permission_request
         deny_spellings = view.deny_table_spellings
+        deny_column_spellings = view.deny_column_spellings
+        identifier_case_sensitive = view.metadata.get("fabric_identifier_case_sensitive")
     source_role_decision = await SourceRoleEvaluator(pool).evaluate(permission_request)
 
     policy_engine = PolicyEngine(pool)
@@ -4865,6 +4914,8 @@ async def policy_dry_run(
         columns=column_list,
         classification_tags=dry_run_metadata["classification_tags"],
         deny_table_spellings=deny_spellings,
+        deny_column_spellings=deny_column_spellings,
+        identifier_case_sensitive=identifier_case_sensitive,
     )
     matched = []
     if policy_decision.rule_id:
@@ -5191,6 +5242,7 @@ def _data_source_edit_context(
     exclude = exclude | {"allow_private_egress"}
     ds["allow_private_egress"] = config_bool(cfg.get("allow_private_egress"))
     ds["editable_connection_fields"] = _editable_connection_fields(cfg, exclude=exclude)
+    ds["fabric_form"] = {key: value for key, value in cfg.items() if key != "client_secret_ref"}
     ds["masked_connection_config"] = sanitize_config(
         cfg if stored_cfg is None else stored_cfg, connector
     )
@@ -5237,7 +5289,22 @@ async def update_data_source_page(source_id: str, request: Request) -> Response:
     name = str(form.get("name") or before.get("name") or source_id).strip()
     cache_strategy = str(form.get("cache_strategy") or before.get("cache_strategy") or "bypass")
     enabled = str(form.get("enabled") or "") == "on"
-    refusal = _console_tls_refusal(request, str(before.get("source_type") or ""), cfg)
+    connector = get_connector(str(before.get("source_type") or ""), before.get("metadata") or {})
+    if connector.key == "fabric_sql":
+        cfg = {**stored_cfg, **_fabric_form_config(form)}
+        if (
+            cfg["auth_mode"] == "spn"
+            and not cfg.get("client_secret_ref")
+            and stored_cfg.get("auth_mode") == "spn"
+        ):
+            cfg["client_secret_ref"] = stored_cfg.get("client_secret_ref")
+        if cfg["auth_mode"] == "oauth":
+            cfg.pop("client_secret_ref", None)
+        cfg.pop("allow_private_egress", None)
+        cfg.update(_private_egress_config(form))
+    refusal = _fabric_refusal(connector.key, cfg) or _console_tls_refusal(
+        request, str(before.get("source_type") or ""), cfg
+    )
     if refusal:
         edited = {**before, "name": name, "cache_strategy": cache_strategy, "enabled": enabled}
         return _render_page(
@@ -5263,8 +5330,7 @@ async def update_data_source_page(source_id: str, request: Request) -> Response:
         cache_strategy,
         enabled,
     )
-    async with pool.acquire() as conn:
-        await conn.execute("NOTIFY onyx_config_changed")
+    await notify_source_change(request)
     await invalidate_source_cache(request, source_id)
     await after_source_saved(request, source_id)
     await audit_admin_action(
@@ -5319,6 +5385,11 @@ async def data_source_detail(source_id: str, request: Request) -> HTMLResponse:
     ds_dict["connector_capabilities"] = connector.capabilities
     ds_dict["connection_summary"] = _safe_connection_summary(ds_dict)
     cfg = _connection_config(ds_dict)
+    if connector.key == "fabric_sql":
+        from interlock.admin.routes.fabric_auth import oauth_ready, safe_auth_status
+
+        ds_dict["fabric_auth"] = await safe_auth_status(request, source_id, cfg)
+        ds_dict["fabric_oauth_ready"] = oauth_ready(request, cfg)
     ds_dict["credential_mode"] = _credential_mode(cfg)
     ds_dict["masked_connection_config"] = sanitize_config(cfg, connector)
     try:
@@ -5449,12 +5520,17 @@ async def test_registered_source_form(source_id: str, request: Request) -> HTMLR
         metadata = {}
     if isinstance(metadata, str):
         metadata = json.loads(metadata)
-    status = await ConnectionManager.probe_unsaved(
-        row["source_type"],
-        cfg or {},
-        connector_key=connector_key_for(row["source_type"], metadata),
-        allow_insecure_tls=allows_insecure_upstream_tls(request.app.state.config),
-    )
+    if connector_key_for(row["source_type"], metadata) == "fabric_sql":
+        from interlock.admin.routes.fabric_auth import probe_saved
+
+        status = await probe_saved(request, source_id, cfg or {})
+    else:
+        status = await ConnectionManager.probe_unsaved(
+            row["source_type"],
+            cfg or {},
+            connector_key=connector_key_for(row["source_type"], metadata),
+            allow_insecure_tls=allows_insecure_upstream_tls(request.app.state.config),
+        )
     await audit_admin_action(
         request,
         action="data_source.probe",
@@ -5501,8 +5577,7 @@ async def toggle_data_source_enabled(source_id: str, request: Request) -> Respon
         """,
         source_id,
     )
-    async with pool.acquire() as conn:
-        await conn.execute("NOTIFY onyx_config_changed")
+    await notify_source_change(request)
     await invalidate_source_cache(request, source_id)
     await after_source_saved(request, source_id)
     await audit_admin_action(
@@ -5566,8 +5641,7 @@ async def delete_data_source_from_dashboard(source_id: str, request: Request) ->
     if before_row is None:
         return _mutation_redirect(request, "/dashboard/data-sources")
     await pool.execute("DELETE FROM data_sources WHERE source_id = $1", source_id)
-    async with pool.acquire() as conn:
-        await conn.execute("NOTIFY onyx_config_changed")
+    await notify_source_change(request)
     await invalidate_source_cache(request, source_id)
     await audit_admin_action(
         request,
@@ -6490,6 +6564,8 @@ def _wizard_state(form: dict[str, Any]) -> dict[str, Any]:
         "allow_private_egress": form.get("allow_private_egress", ""),
         "probe_path": form.get("probe_path", ""),
     }
+    if state["connector_key"] == "fabric_sql":
+        state.update(_fabric_form_config(form))
     cols = form.get("pii_columns")
     if isinstance(cols, list):
         state["pii_columns"] = cols
@@ -6505,7 +6581,7 @@ async def _wizard_state_from_form(request: Request, form: Any) -> dict[str, Any]
     form_dict = dict(form)
     wizard_id = str(form_dict.get("wizard_id") or "").strip() or _new_wizard_id()
     draft = await _load_wizard_draft(request, wizard_id)
-    for secret_field in ("password", "token", "auth_header"):
+    for secret_field in ("password", "token", "auth_header", "client_secret_ref"):
         if form_dict.get(secret_field) == "" and draft.get(secret_field):
             form_dict.pop(secret_field, None)
     merged = {**draft, **form_dict, "wizard_id": wizard_id}
@@ -6523,7 +6599,7 @@ async def _wizard_state_from_form(request: Request, form: Any) -> dict[str, Any]
 
 # Connectors whose SQL the gateway governs through its own derivation; the
 # dry-runs take the same path for them.
-_SQL_DRY_RUN_CONNECTORS = frozenset({"postgresql", "mysql", "mariadb", "snowflake"})
+_SQL_DRY_RUN_CONNECTORS = frozenset({"postgresql", "mysql", "mariadb", "snowflake", "fabric_sql"})
 
 
 def _dry_run_pipeline(request: Request) -> GatewayPipeline:
@@ -6723,6 +6799,16 @@ async def wizard_test(request: Request) -> HTMLResponse:
             {"ok": False, "latency_ms": 0.0, "error": inactive},
         )
     connector = get_connector(state["source_type"], {"connector_key": state["connector_key"]})
+    if connector.key == "fabric_sql":
+        return _render(
+            request,
+            "partials/connection_test_result.html",
+            {
+                "ok": False,
+                "latency_ms": 0.0,
+                "error": "Save the Fabric source before testing its connection",
+            },
+        )
     if state["source_type"] in {"postgresql", "mysql"} or connector.family == "database":
         cfg: dict[str, Any] = {
             "host": state["host"],
@@ -6833,8 +6919,10 @@ async def wizard_save(request: Request) -> HTMLResponse:
             {"state": state, "error": inactive},
         )
     connector = get_connector(state["source_type"], {"connector_key": state["connector_key"]})
-    if state["source_type"] in {"postgresql", "mysql"} or connector.family == "database":
-        cfg: dict[str, Any] = {"host": state["host"], "port": int(state["port"] or 5432)}
+    if connector.key == "fabric_sql":
+        cfg = _fabric_form_config(state)
+    elif state["source_type"] in {"postgresql", "mysql"} or connector.family == "database":
+        cfg = {"host": state["host"], "port": int(state["port"] or 5432)}
         if state["database"]:
             cfg["database"] = state["database"]
         if state["user"]:
@@ -6858,7 +6946,9 @@ async def wizard_save(request: Request) -> HTMLResponse:
     cfg.update(_private_egress_config(state))
     cfg.update(_http_probe_config(state, connector.key))
 
-    refusal = _console_tls_refusal(request, connector.source_type, cfg)
+    refusal = _fabric_refusal(connector.key, cfg) or _console_tls_refusal(
+        request, connector.source_type, cfg
+    )
     if refusal:
         return _render(
             request,

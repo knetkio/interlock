@@ -440,8 +440,22 @@ def connector_page(d: Any) -> str:
             "Secret fields should be given as a reference, `<field>_ref`, such as "
             "`env://NAME`, rather than a literal.\n\n"
         )
-        rows = [[_code(f), "no"] for f in d.credential_fields]
-        rows += [[_code(f), f"yes; prefer {_code(f + '_ref')}"] for f in d.secret_fields]
+        rows = [
+            [_code(f), "no"]
+            for f in d.credential_fields
+            if f not in d.secret_fields or not f.endswith("_ref")
+        ]
+        rows += [
+            [
+                _code(f),
+                (
+                    "yes; reference required"
+                    if f.endswith("_ref")
+                    else f"yes; prefer {_code(f + '_ref')}"
+                ),
+            ]
+            for f in d.secret_fields
+        ]
         parts.append(_table(["Key", "Secret"], rows))
         if d.key in _CONNECTOR_KEY_NOTES:
             parts.append("\n" + _CONNECTOR_KEY_NOTES[d.key])

@@ -1,0 +1,13 @@
+<section class="card">
+  <h2>Fabric authentication</h2>
+  <p role="status">{% if fabric_auth.status == 'disconnected' %}Needs sign-in{% else %}{{ fabric_auth.status|replace('_', ' ') }}{% endif %}{% if fabric_auth.account_id %} · Account <code>{{ fabric_auth.account_id }}</code>{% endif %}</p>
+  {% if fabric_auth.auth_mode == 'oauth' %}
+  <button class="btn btn-primary" hx-post="/api/data-sources/{{ ds.source_id }}/fabric/connect" {% if not ds.enabled or not fabric_oauth_ready %}disabled{% endif %}>{% if fabric_auth.status == 'connected' %}Reconnect{% else %}Connect{% endif %}</button>
+  <button class="btn btn-secondary" hx-post="/api/data-sources/{{ ds.source_id }}/fabric/disconnect">Disconnect</button>
+  {% if not fabric_oauth_ready %}<p class="field-help">The operator must configure the Fabric OAuth application, allowed tenant and registered callback before connecting.</p>{% endif %}
+  {% else %}
+  <button class="btn btn-secondary" hx-post="/api/data-sources/{{ ds.source_id }}/fabric/rotate" {% if not ds.enabled %}disabled{% endif %}>Rotate credentials</button>
+  <p class="field-help">After updating the referenced secret, rotate to discard previously issued application tokens.</p>
+  {% endif %}
+  <p class="field-help">Test Connection checks connectivity only. Catalog discovery is a separate scan; see the source catalog scan status below.</p>
+</section>

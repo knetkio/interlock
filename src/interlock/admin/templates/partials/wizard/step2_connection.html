@@ -18,7 +18,9 @@
     <input type="hidden" name="connector_key" value="{{ state.connector_key }}">
     <input type="hidden" name="create_default_roles" value="{{ state.create_default_roles|default('off') }}">
 
-    {% if state.source_type in ['postgresql', 'mysql', 'database'] %}
+    {% if state.connector_key == 'fabric_sql' %}
+    {% with form=state %}{% include "partials/fabric_connection_fields.html" %}{% endwith %}
+    {% elif state.source_type in ['postgresql', 'mysql', 'database'] %}
     <div class="form-row">
       <label>Host
         <input name="host" required value="{{ state.host|default('') }}"
@@ -174,6 +176,7 @@
               hx-include="#wizard-form"
               hx-target="#new-source-form-slot">← Back</button>
       <button type="button" class="btn btn-secondary"
+              {% if state.connector_key == 'fabric_sql' %}disabled title="Save the source first"{% endif %}
               hx-post="/dashboard/source-wizard/test"
               hx-include="#wizard-form"
               hx-target="#wizard-test-result">Test Connection</button>

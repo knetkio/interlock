@@ -15,6 +15,7 @@ from interlock.cache.faiss_index import FAISSIndex
 from interlock.catalog.runner import CatalogScanRunner
 from interlock.catalog.scheduler import CatalogScheduler
 from interlock.config import InterLockConfig, allows_insecure_upstream_tls, load_config
+from interlock.connections.fabric.runtime import FabricServices, build_fabric_services
 from interlock.connections.manager import ConnectionManager
 from interlock.db.pool import close_pg_pool, create_pg_pool
 from interlock.db.redis import close_redis_client, create_redis_client
@@ -42,6 +43,7 @@ class WorkerRuntime:
     catalog_runner: CatalogScanRunner | None = None
     catalog_scheduler: CatalogScheduler | None = None
     conn_manager: ConnectionManager | None = None
+    fabric_services: FabricServices | None = None
 
 
 def _configure_worker_observability(worker_id: str) -> OTelBootstrapResult:
@@ -124,7 +126,9 @@ async def _create_worker_runtime(config: InterLockConfig) -> WorkerRuntime:
         embedding_engine=embedding_engine,
     )
 
+    fabric_services = build_fabric_services(pg_pool, config.fabric)
     worker = IngestionWorker(
+        fabric_services=fabric_services,
         worker_id=worker_id,
         pg_pool=pg_pool,
         redis_client=redis_client,
@@ -151,6 +155,7 @@ async def _create_worker_runtime(config: InterLockConfig) -> WorkerRuntime:
         conn_manager = ConnectionManager(
             registry,
             allow_insecure_upstream_tls=allows_insecure_upstream_tls(config),
+            fabric_services=fabric_services,
         )
         # Discovery follows the catalog: after a scan changes a SQL source, its
         # tables are re-indexed from what the scan recorded instead of being
@@ -167,6 +172,7 @@ async def _create_worker_runtime(config: InterLockConfig) -> WorkerRuntime:
             config=config.catalog,
             worker_id=worker_id,
             on_scanned=schema_indexer.index_from_catalog,
+            fabric_services=fabric_services,
         )
         if config.catalog.scheduled_refresh_enabled:
             catalog_scheduler = CatalogScheduler(pg_pool=pg_pool, config=config.catalog)
@@ -179,6 +185,7 @@ async def _create_worker_runtime(config: InterLockConfig) -> WorkerRuntime:
         catalog_runner=catalog_runner,
         catalog_scheduler=catalog_scheduler,
         conn_manager=conn_manager,
+        fabric_services=fabric_services,
     )
 
 
@@ -218,6 +225,8 @@ async def _create_and_run_worker() -> None:
         if runtime.conn_manager is not None:
             await runtime.conn_manager.close_all()
 
+        if runtime.fabric_services is not None:
+            await runtime.fabric_services.close()
         if runtime.redis_client is not None:
             await close_redis_client(runtime.redis_client)
         await close_pg_pool(runtime.pg_pool)

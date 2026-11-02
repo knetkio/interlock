@@ -5,7 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from interlock.connections.fabric.credentials import FabricCurrentSource
 
 # Node types a collector may emit. Kept in step with the CHECK constraint on
 # `source_catalog.node_type` in migrations/016_source_catalog.sql.
@@ -40,7 +43,8 @@ class CatalogNode:
     `path` is the node's identity, in native case, from the source root - an
     array because identifiers and S3 keys can themselves contain dots.
     `resource_key` is the string enforcement matches patterns against, which
-    for SQL is the lower-cased dotted form such as `sales.customers.email`.
+    for SQL is a dotted form such as `sales.customers.email`. Fabric preserves
+    native spelling; other SQL collectors retain their lower-case convention.
     """
 
     node_type: str
@@ -95,9 +99,9 @@ class CatalogSnapshot:
 
     `complete_subtrees` lists the paths a collector enumerated without hitting
     a cap. The store only marks a node removed when it falls under one of them,
-    so a truncated scan can never report mass removals that did not happen. A
-    collector that finished without truncation reports `[()]` - the whole
-    source.
+    so a truncated scan retains unseen nodes within the same upstream identity.
+    An identity change makes old unseen inventory non-current even during a
+    partial scan. A completed scan reports `[()]` - the whole source.
     """
 
     nodes: list[CatalogNode] = field(default_factory=list)
@@ -106,6 +110,7 @@ class CatalogSnapshot:
     truncation: dict[str, Any] = field(default_factory=dict)
     complete_subtrees: list[tuple[str, ...]] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    publication_context: FabricCurrentSource | None = field(default=None, repr=False)
 
     def is_complete_under(self, path: tuple[str, ...]) -> bool:
         return any(path[: len(subtree)] == subtree for subtree in self.complete_subtrees)

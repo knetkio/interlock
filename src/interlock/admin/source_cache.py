@@ -24,3 +24,12 @@ async def invalidate_source_cache(request: Request, source_id: str) -> None:
         await invalidator.invalidate_for_source(source_id)
     except Exception:
         logger.warning("Cache invalidation failed for source=%s", source_id, exc_info=True)
+
+
+async def notify_source_change(request: Request, channel: str = "onyx_config_changed") -> None:
+    """Publish after commit; failed notification must not skip cache invalidation."""
+    try:
+        async with request.app.state.pg_pool.acquire() as conn:
+            await conn.execute(f"NOTIFY {channel}")
+    except Exception:
+        logger.warning("Source configuration notification failed", exc_info=True)

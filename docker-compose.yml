@@ -1,3 +1,13 @@
+x-fabric-environment: &fabric-environment
+  # Inherited-null entries are omitted inside containers when unset on the host.
+  # In particular, an empty optional secret reference fails FabricSettings validation.
+  INTERLOCK_FABRIC__ACTIVE_KEY_VERSION:
+  INTERLOCK_FABRIC__KEY_REFS:
+  INTERLOCK_FABRIC__OAUTH_REDIRECT_URI:
+  INTERLOCK_FABRIC__OAUTH_CLIENT_ID:
+  INTERLOCK_FABRIC__OAUTH_CLIENT_SECRET_REF:
+  INTERLOCK_FABRIC__OAUTH_ALLOWED_TENANTS:
+
 services:
   gateway:
     build:
@@ -16,6 +26,7 @@ services:
       - "127.0.0.1:3001:3000"
       - "127.0.0.1:5434:5432"
     environment:
+      <<: *fabric-environment
       INGESTION_MODE: disabled
       DATABASE_URL: postgresql://onyx:onyx_dev@postgres:5432/onyx
       REDIS_URL: redis://redis:6379/0
@@ -49,6 +60,7 @@ services:
     ports:
       - "127.0.0.1:9090:9090"
     environment:
+      <<: *fabric-environment
       DATABASE_URL: postgresql://onyx:onyx_dev@postgres:5432/onyx
       REDIS_URL: redis://redis:6379/0
       INTERLOCK_DATABASE__HOST: postgres
@@ -81,6 +93,7 @@ services:
         INTERLOCK_EXTRA: production-worker
     command: ["interlock.worker"]
     environment:
+      <<: *fabric-environment
       WORKER_ID: "1"
       DATABASE_URL: postgresql://onyx:onyx_dev@postgres:5432/onyx
       REDIS_URL: redis://redis:6379/0
@@ -109,6 +122,7 @@ services:
         INTERLOCK_EXTRA: production-worker
     command: ["interlock.worker"]
     environment:
+      <<: *fabric-environment
       WORKER_ID: "2"
       DATABASE_URL: postgresql://onyx:onyx_dev@postgres:5432/onyx
       REDIS_URL: redis://redis:6379/0

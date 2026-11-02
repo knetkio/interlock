@@ -215,6 +215,8 @@ def _has_any_role(session_roles: tuple[str, ...], allowed: frozenset[str]) -> bo
 
 
 def _required_admin_roles(path: str, method: str) -> frozenset[str] | None:
+    if path == "/api/fabric/oauth/callback":
+        return frozenset({"source_admin", "security_admin"})
     unsafe = method.upper() in UNSAFE_METHODS
     if unsafe:
         for prefix, roles in _ADMIN_MUTATION_RULES:

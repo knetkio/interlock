@@ -21,6 +21,7 @@
 
     <div class="form-row">
       <label>Connector
+        <span class="js-fabric-picker" {% if form.connector_key != 'fabric_sql' %}hidden{% endif %}><img src="/static/assets/connectors/fabric.svg" width="24" height="24" alt="Microsoft Fabric"> </span>
         <select name="connector_key" class="js-source-type-select">
           {% for category, connector_list in connector_groups %}
             <optgroup label="{{ category }}">
@@ -69,8 +70,12 @@
       <span class="field-help">Allow a source on a private network, such as a Docker Compose service or a VPC address. InterLock refuses private addresses unless a source opts in; every use is logged.</span>
     </div>
 
+    <div class="type-block" data-connector="fabric_sql" {% if form.connector_key != 'fabric_sql' %}hidden{% endif %}>
+      {% include "partials/fabric_connection_fields.html" %}
+    </div>
+
     <div class="type-block" data-family="database" data-connector="postgresql,mysql,mariadb,mssql"
-         {% if form.source_type not in ['postgresql', 'mysql', 'database'] %}hidden{% endif %}>
+         {% if form.connector_key == 'fabric_sql' or form.source_type not in ['postgresql', 'mysql', 'database'] %}hidden{% endif %}>
       <div class="form-row">
         <label>Host
           <input name="host" value="{{ form.host }}" placeholder="postgres or 10.0.1.5">
@@ -537,6 +542,7 @@
 
     <div class="form-actions">
       <button type="button" class="btn btn-secondary"
+              {% if form.connector_key == 'fabric_sql' %}disabled title="Save the source first"{% endif %}
               hx-post="/dashboard/data-sources/test"
               hx-include="#source-form"
               hx-target="#test-result-strip"

@@ -38,7 +38,10 @@
     </div>
 
     <h4 class="form-subheader">Safe connection fields</h4>
-    {% if ds.editable_connection_fields %}
+    {% if ds.connector_key == 'fabric_sql' %}
+      {% with form=ds.fabric_form %}{% include "partials/fabric_connection_fields.html" %}{% endwith %}
+      <p class="field-help">Leave the service principal secret reference blank to retain its current value.</p>
+    {% elif ds.editable_connection_fields %}
       {% for field in ds.editable_connection_fields %}
       <div class="form-row">
         <label>{{ field.key }}

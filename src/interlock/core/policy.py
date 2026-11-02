@@ -125,6 +125,7 @@ class PolicyEngine:
         sql: str | None = None,
         deny_table_spellings: set[str] | None = None,
         deny_column_spellings: set[str] | None = None,
+        identifier_case_sensitive: bool | None = None,
     ) -> PolicyDecision:
         """Evaluate all rules against a request. Default-deny.
 
@@ -154,8 +155,16 @@ class PolicyEngine:
                 classification_tags,
                 deny_table_spellings if is_deny else None,
                 deny_column_spellings if is_deny else None,
+                identifier_case_sensitive,
             ):
                 effect = rule.actions.get("effect", "deny")
+                if identifier_case_sensitive is False and any(
+                    not str(name).isascii() or any(p != p.strip() for p in str(name).split("."))
+                    for name in rule.actions.get("redact_columns", [])
+                ):
+                    return PolicyDecision(
+                        allowed=False, reason="Unsupported Fabric redaction identifier equivalence"
+                    )
                 allowed = effect == "allow"
                 redact_columns = rule.actions.get("redact_columns", [])
                 rate_limit = _normalize_rate_limit(rule.actions.get("rate_limit"))
@@ -190,6 +199,7 @@ class PolicyEngine:
         classification_tags: list[str] | None,
         table_spellings: set[str] | None = None,
         column_spellings: set[str] | None = None,
+        identifier_case_sensitive: bool | None = None,
     ) -> bool:
         """Check whether a rule matches the given request context.
 
@@ -227,11 +237,33 @@ class PolicyEngine:
             if operation not in op_types:
                 return False
 
+        # Fabric comparison is supplied by trusted source catalog naming. None
+        # preserves the legacy comparison used by every other connector.
+        def normalize(value: object) -> str:
+            text = str(value).strip()
+            return text if identifier_case_sensitive else text.lower()
+
+        if identifier_case_sensitive is not None:
+            tables = [normalize(t) for t in tables or []]
+            columns = [normalize(c) for c in columns or []]
+            table_spellings = {normalize(t) for t in table_spellings or []}
+            column_spellings = {normalize(c) for c in column_spellings or []}
+        # A CI deny outside the proven ASCII domain cannot silently become
+        # a non-match. Allows using such identifiers cannot establish scope.
+        if identifier_case_sensitive is False:
+            scoped_names = [*cond.get("tables", []), *cond.get("columns", [])]
+            if any(
+                not str(name).isascii() or any(p != p.strip() for p in str(name).split("."))
+                for name in scoped_names
+            ):
+                return rule.actions.get("effect", "deny") != "allow"
         # tables
         rule_tables = cond.get("tables")
         if rule_tables:
+            if identifier_case_sensitive is not None:
+                rule_tables = [normalize(t) for t in rule_tables]
             if table_spellings:
-                wanted = {str(table).strip().lower() for table in rule_tables}
+                wanted = {normalize(table) for table in rule_tables}
                 if not (wanted & table_spellings):
                     return False
             elif not tables or not (set(tables) & set(rule_tables)):
@@ -240,10 +272,12 @@ class PolicyEngine:
         # columns
         rule_columns = cond.get("columns")
         if rule_columns:
+            if identifier_case_sensitive is not None:
+                rule_columns = [normalize(c) for c in rule_columns]
             if column_spellings:
                 # `*` marks columns that could not be determined: the query may
                 # read the denied ones, so the deny applies.
-                wanted = {str(column).strip().lower() for column in rule_columns}
+                wanted = {normalize(column) for column in rule_columns}
                 if "*" not in column_spellings and not (wanted & column_spellings):
                     return False
             elif not columns or not (set(columns) & set(rule_columns)):

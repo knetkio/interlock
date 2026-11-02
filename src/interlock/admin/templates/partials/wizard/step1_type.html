@@ -22,6 +22,7 @@
     </div>
     <div class="form-row">
       <label>Connector
+        <span class="js-fabric-picker" {% if state.connector_key != 'fabric_sql' %}hidden{% endif %}><img src="/static/assets/connectors/fabric.svg" width="24" height="24" alt="Microsoft Fabric"> </span>
         <select name="connector_key" class="js-wizard-connector-select">
           {% for category, connector_list in connector_groups %}
           <optgroup label="{{ category }}">

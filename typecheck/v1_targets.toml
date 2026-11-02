@@ -28,6 +28,7 @@ strict_files = [
   "src/interlock/admin/routes/auth.py",
   "src/interlock/admin/routes/catalog.py",
   "src/interlock/admin/routes/connectors.py",
+  "src/interlock/admin/routes/fabric_auth.py",
   "src/interlock/admin/routes/password.py",
 ]
 
@@ -65,6 +66,13 @@ paths = [
   "src/interlock/connections/connectors.py",
   "src/interlock/connections/manager.py",
   "src/interlock/connections/source_config.py",
+  "src/interlock/connections/fabric/__init__.py",
+  "src/interlock/connections/fabric/config.py",
+  "src/interlock/connections/fabric/credentials.py",
+  "src/interlock/connections/fabric/auth.py",
+  "src/interlock/connections/fabric/runtime.py",
+  "src/interlock/connections/fabric/adapter.py",
+  "src/interlock/connections/sqlserver.py",
   "src/interlock/connections/activation.py",
   "src/interlock/connections/role_vocabulary.py",
 ]
@@ -76,6 +84,13 @@ strict_files = [
   "src/interlock/connections/adapters/s3.py",
   "src/interlock/connections/circuit_breaker.py",
   "src/interlock/connections/source_config.py",
+  "src/interlock/connections/fabric/__init__.py",
+  "src/interlock/connections/fabric/config.py",
+  "src/interlock/connections/fabric/credentials.py",
+  "src/interlock/connections/fabric/auth.py",
+  "src/interlock/connections/fabric/runtime.py",
+  "src/interlock/connections/fabric/adapter.py",
+  "src/interlock/connections/sqlserver.py",
 ]
 
 [[areas]]
@@ -85,6 +100,7 @@ paths = ["src/interlock/catalog"]
 strict_files = [
   "src/interlock/catalog/__init__.py",
   "src/interlock/catalog/collectors/__init__.py",
+  "src/interlock/catalog/collectors/fabric.py",
   "src/interlock/catalog/collectors/mysql.py",
   "src/interlock/catalog/collectors/postgres.py",
   "src/interlock/catalog/collectors/snowflake.py",

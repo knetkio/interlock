@@ -2341,3 +2341,6 @@ body.login-body {
 .custom-roles { display: none; }
 .admin-user-form:has(input[name="user_type"][value="custom"]:checked) .custom-roles { display: grid; }
 .custom-roles .checkbox span { min-width: 0; }
+
+/* A conditional Fabric label must stay hidden despite form label flex rules. */
+.fabric-fields [hidden] { display: none !important; }

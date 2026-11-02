@@ -178,7 +178,7 @@ function interlockUpdateSourceType(select) {
     }
     document.querySelectorAll('.type-block').forEach(function(block) {
         var connectors = (block.dataset.connector || '').split(',');
-        var active = block.dataset.type === select.value ||
+        var active = select.value === 'fabric_sql' ? connectors.indexOf(select.value) !== -1 : block.dataset.type === select.value ||
             block.dataset.family === family ||
             connectors.indexOf(select.value) !== -1;
         block.hidden = !active;
@@ -186,6 +186,9 @@ function interlockUpdateSourceType(select) {
             input.disabled = !active;
         });
     });
+    var testButton = document.querySelector('#source-form [hx-post="/dashboard/data-sources/test"]');
+    if (testButton) { testButton.disabled = select.value === 'fabric_sql'; testButton.title = testButton.disabled ? 'Save the source first' : ''; }
+    interlockFabricFields(document);
 }
 
 function interlockCloseModal(rootId) {
@@ -207,9 +210,24 @@ function interlockWizardConnectorChanged(select) {
     }
 }
 
+function interlockFabricFields(root) {
+    (root || document).querySelectorAll('.js-fabric-auth-mode').forEach(function(select) {
+        var field = select.closest('.fabric-fields').querySelector('.js-fabric-spn');
+        field.hidden = select.value !== 'spn';
+        field.querySelector('input').disabled = field.hidden || select.disabled;
+    });
+    (root || document).querySelectorAll('.js-fabric-picker').forEach(function(icon) {
+        var select = icon.closest('label').querySelector('select');
+        icon.hidden = select.value !== 'fabric_sql';
+    });
+}
+document.addEventListener('change', function(event) {
+    if (event.target.matches('.js-fabric-auth-mode, .js-source-type-select, .js-wizard-connector-select')) interlockFabricFields(document);
+});
 function interlockInitDynamicForms(root) {
     (root || document).querySelectorAll('.grant-source-select').forEach(interlockUpdateGrantRoleOptions);
     (root || document).querySelectorAll('.js-source-type-select').forEach(interlockUpdateSourceType);
+    interlockFabricFields(root);
     (root || document).querySelectorAll('.js-wizard-connector-select').forEach(interlockWizardConnectorChanged);
 }
 

@@ -201,6 +201,23 @@ Approval notifications.
 | `notifications.max_attempts` | `INTERLOCK_NOTIFICATIONS__MAX_ATTEMPTS` | `3` | Delivery attempts per message. |
 | `notifications.allow_private_egress` | `INTERLOCK_NOTIFICATIONS__ALLOW_PRIVATE_EGRESS` | `false` | Allow delivery to private network addresses. |
 
+## `fabric`
+
+Explicit Fabric SQL authentication and credential-encryption settings.
+
+| Key | Environment variable | Default | Meaning |
+|---|---|---|---|
+| `fabric.active_key_version` | `INTERLOCK_FABRIC__ACTIVE_KEY_VERSION` | `unset` | Active credential-encryption key version; absent disables Fabric services. |
+| `fabric.key_refs` | `INTERLOCK_FABRIC__KEY_REFS` | `{}` | Version-to-secret-reference map for active and retained Fernet keys. |
+| `fabric.oauth_redirect_uri` | `INTERLOCK_FABRIC__OAUTH_REDIRECT_URI` | `unset` | Exact registered console origin plus /api/fabric/oauth/callback. |
+| `fabric.oauth_client_id` | `INTERLOCK_FABRIC__OAUTH_CLIENT_ID` | `unset` | Explicit confidential Web application ID for saved-user OAuth. |
+| `fabric.oauth_client_secret_ref` | `INTERLOCK_FABRIC__OAUTH_CLIENT_SECRET_REF` | `unset` | Secret reference for the confidential OAuth application credential. |
+| `fabric.oauth_allowed_tenants` | `INTERLOCK_FABRIC__OAUTH_ALLOWED_TENANTS` | `[]` | Explicit tenant IDs allowed for saved-user OAuth. |
+| `fabric.lock_timeout_seconds` | `INTERLOCK_FABRIC__LOCK_TIMEOUT_SECONDS` | `30.0` | Deadline for credential pool/lock/auth lifecycle operations, in seconds. |
+| `fabric.refresh_skew_seconds` | `INTERLOCK_FABRIC__REFRESH_SKEW_SECONDS` | `120` | Renew saved SQL access tokens this many seconds before expiry. |
+| `fabric.max_concurrent_operations` | `INTERLOCK_FABRIC__MAX_CONCURRENT_OPERATIONS` | `8` | Reserved concurrency setting; current transport uses eight active slots. |
+| `fabric.max_waiting_operations` | `INTERLOCK_FABRIC__MAX_WAITING_OPERATIONS` | `16` | Reserved queue setting; current transport allows sixteen waiting submissions. |
+
 ## `approvals`
 
 Write approvals.

@@ -22,14 +22,16 @@ whole table.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
+from typing import cast
 
 import sqlglot
 from sqlglot import exp
 from sqlglot.errors import OptimizeError, ParseError, SqlglotError
 from sqlglot.optimizer.qualify import qualify
 from sqlglot.optimizer.scope import Scope, build_scope, traverse_scope
+from sqlglot.schema import MappingSchema
 
 # (schema, table) -> ordered column names, lower-cased
 ColumnCatalog = Mapping[tuple[str, str], tuple[str, ...]]
@@ -46,6 +48,8 @@ class ColumnAccess:
     that refuses the request.
     """
 
+    case_sensitive: bool = False
+    refusals: list[str] = field(default_factory=list)
     columns: dict[str, set[str]] = field(default_factory=dict)
     whole_table: set[str] = field(default_factory=set)
     gaps: dict[str, str] = field(default_factory=dict)
@@ -57,11 +61,12 @@ class ColumnAccess:
         self.columns.setdefault(table, set())
 
     def add(self, table: str, column: str) -> None:
-        self.columns.setdefault(table, set()).add(column.lower())
+        self.columns.setdefault(table, set()).add(column if self.case_sensitive else column.lower())
 
 
-def _table_key(table: exp.Table) -> str:
-    return ".".join(part for part in (table.db, table.name) if part).lower()
+def _table_key(table: exp.Table, case_sensitive: bool = False) -> str:
+    key = ".".join(part for part in (table.db, table.name) if part)
+    return key if case_sensitive else key.lower()
 
 
 def _pair(key: str) -> tuple[str, str]:
@@ -85,9 +90,65 @@ def _mapping_schema(
 
 
 def column_access(
-    sql: str, *, dialect: str, resolve: Resolver, catalog: ColumnCatalog | None
+    sql: str,
+    *,
+    dialect: str,
+    resolve: Resolver,
+    catalog: ColumnCatalog | None,
+    case_sensitive: bool = False,
+    native_identifiers: bool = False,
+    _scoped_lineage: bool = False,
 ) -> ColumnAccess:
-    access = ColumnAccess()
+    if native_identifiers and not case_sensitive and catalog is not None:
+        # The initial CI contract is ASCII case equivalence only. Preserve the
+        # catalog-native spelling at the authorization boundary while sqlglot
+        # resolves equivalent spellings using its case-insensitive grammar.
+        try:
+            parsed = sqlglot.parse_one(sql, read=dialect)
+        except SqlglotError:
+            return ColumnAccess(refusals=["Fabric SQL column scope could not be parsed"])
+        touched = {
+            resolve(".".join(p.name for p in table.parts)) for table in parsed.find_all(exp.Table)
+        }
+        relevant = {pair: cols for pair, cols in catalog.items() if ".".join(pair) in touched}
+        raw_tables = {f"{s}.{t}".lower(): f"{s}.{t}" for s, t in relevant}
+        raw_columns = {f"{s}.{t}.{c}".lower(): c for (s, t), cols in relevant.items() for c in cols}
+        identifiers = [i.name for i in parsed.find_all(exp.Identifier)]
+        identifiers += [part for pair, cols in relevant.items() for part in (*pair, *cols)]
+        ambiguous = len(raw_columns) != sum(len(cols) for cols in relevant.values())
+        if ambiguous or any(not i.isascii() or i != i.strip() for i in identifiers):
+            access = ColumnAccess(refusals=["Unsupported Fabric CI identifier equivalence"])
+            for key in touched:
+                access.touch(key)
+                access.gaps[key] = "unsupported Fabric CI identifier equivalence"
+            return access
+        folded = column_access(
+            sql,
+            dialect=dialect,
+            resolve=lambda name: resolve(name).lower(),
+            _scoped_lineage=True,
+            catalog={
+                (s.lower(), t.lower()): tuple(c.lower() for c in cols)
+                for (s, t), cols in relevant.items()
+            },
+        )
+        folded.columns = {
+            raw_tables.get(t, t): {raw_columns.get(f"{t}.{c}", c) for c in cols}
+            for t, cols in folded.columns.items()
+        }
+        folded.gaps = {raw_tables.get(t, t): reason for t, reason in folded.gaps.items()}
+        folded.whole_table = {raw_tables.get(t, t) for t in folded.whole_table}
+
+        def native_column(name: str) -> str:
+            table, _, column = name.rpartition(".")
+            return f"{raw_tables.get(table, table)}.{raw_columns.get(name, column)}"
+
+        folded.lineage = {
+            alias: {native_column(name) for name in names}
+            for alias, names in folded.lineage.items()
+        }
+        return folded
+    access = ColumnAccess(case_sensitive=case_sensitive)
     try:
         statements = [s for s in sqlglot.parse(sql, read=dialect) if s is not None]
     except (ParseError, SqlglotError):
@@ -100,19 +161,23 @@ def column_access(
             catalog=catalog,
             access=access,
             outermost=len(statements) == 1,
+            scoped_lineage=native_identifiers or _scoped_lineage,
         )
     return access
 
 
-def _rewrite_tables(statement: exp.Expression, resolve: Resolver) -> set[str]:
+def _rewrite_tables(
+    statement: exp.Expression, resolve: Resolver, case_sensitive: bool = False
+) -> set[str]:
     """Replace each table reference with its canonical schema.table, in place."""
-    ctes = {str(c.alias).lower() for c in statement.find_all(exp.CTE) if c.alias}
+    normalize = (lambda value: value) if case_sensitive else str.lower
+    ctes = {normalize(str(c.alias)) for c in statement.find_all(exp.CTE) if c.alias}
     canonical: set[str] = set()
     for table in list(statement.find_all(exp.Table)):
         if not table.name:
             continue
         written = ".".join(p for p in (table.catalog, table.db, table.name) if p)
-        if not table.db and table.name.lower() in ctes:
+        if not table.db and normalize(table.name) in ctes:
             continue
         key = resolve(written)
         if "." not in key:
@@ -133,9 +198,10 @@ def _statement_access(
     catalog: ColumnCatalog | None,
     access: ColumnAccess,
     outermost: bool,
+    scoped_lineage: bool = False,
 ) -> None:
     statement = statement.copy()
-    tables = _rewrite_tables(statement, resolve)
+    tables = _rewrite_tables(statement, resolve, access.case_sensitive)
     for table in tables:
         access.touch(table)
     if catalog is None:
@@ -146,10 +212,18 @@ def _statement_access(
     for table in missing:
         access.gaps.setdefault(table, "the table is not in the source catalog")
 
+    if access.case_sensitive:
+        # sqlglot honors case_sensitive metadata even for unquoted identifiers.
+        for identifier in statement.find_all(exp.Identifier):
+            identifier.meta["case_sensitive"] = True
     try:
         qualified = qualify(
             statement,
-            schema=_mapping_schema(tables, catalog),
+            schema=MappingSchema(
+                _mapping_schema(tables, catalog),
+                dialect=dialect,
+                normalize=not access.case_sensitive,
+            ),
             dialect=dialect,
             validate_qualify_columns=True,
             quote_identifiers=False,
@@ -166,14 +240,22 @@ def _statement_access(
 
     # Writes are not scopes; their columns are read off the statement.
     if isinstance(qualified, exp.Update):
-        key = _table_key(qualified.this) if isinstance(qualified.this, exp.Table) else None
+        key = (
+            _table_key(qualified.this, access.case_sensitive)
+            if isinstance(qualified.this, exp.Table)
+            else None
+        )
         if key:
             for assignment in qualified.expressions:
                 if isinstance(assignment, exp.EQ) and isinstance(assignment.left, exp.Column):
                     access.add(key, assignment.left.name)
             _where_columns(qualified, key, access)
     elif isinstance(qualified, exp.Delete):
-        key = _table_key(qualified.this) if isinstance(qualified.this, exp.Table) else None
+        key = (
+            _table_key(qualified.this, access.case_sensitive)
+            if isinstance(qualified.this, exp.Table)
+            else None
+        )
         if key:
             # Deleting removes whole rows: it needs the whole table.
             access.whole_table.add(key)
@@ -181,7 +263,7 @@ def _statement_access(
     elif isinstance(qualified, exp.Insert):
         into = qualified.this
         table = into.this if isinstance(into, exp.Schema) else into
-        key = _table_key(table) if isinstance(table, exp.Table) else None
+        key = _table_key(table, access.case_sensitive) if isinstance(table, exp.Table) else None
         if key:
             if isinstance(into, exp.Schema) and into.expressions:
                 for column in into.expressions:
@@ -195,8 +277,10 @@ def _statement_access(
                 else:
                     access.gaps.setdefault(key, "INSERT without a column list")
 
-    if outermost and isinstance(qualified, exp.Select):
-        access.lineage = _lineage(qualified)
+    if outermost and scoped_lineage and isinstance(qualified, exp.Query):
+        access.lineage = _native_lineage(qualified, access.case_sensitive)
+    elif outermost and isinstance(qualified, exp.Select):
+        access.lineage = _lineage(qualified, access.case_sensitive)
 
 
 def _where_columns(statement: exp.Expression, key: str, access: ColumnAccess) -> None:
@@ -212,7 +296,7 @@ def _scope_reads(scope: Scope, access: ColumnAccess) -> None:
     for column in scope.columns:
         source = scope.sources.get(column.table)
         if isinstance(source, exp.Table):
-            access.add(_table_key(source), column.name)
+            access.add(_table_key(source, access.case_sensitive), column.name)
     # A table alias used as a value - to_jsonb(c), row_to_json(c) - reads every
     # column, and no column list names them.
     for node in scope.expression.find_all(exp.TableColumn, exp.Column):
@@ -226,31 +310,97 @@ def _scope_reads(scope: Scope, access: ColumnAccess) -> None:
         source = scope.sources.get(alias)
         if isinstance(source, exp.Table):
             access.gaps.setdefault(
-                _table_key(source), f"a whole-row reference to {alias} reads every column"
+                _table_key(source, access.case_sensitive),
+                f"a whole-row reference to {alias} reads every column",
             )
 
 
-def _lineage(select: exp.Select) -> dict[str, set[str]]:
+def _lineage(select: exp.Select, case_sensitive: bool = False) -> dict[str, set[str]]:
     root = build_scope(select)
     if root is None:
         return {}
     out: dict[str, set[str]] = {}
     for projection in select.expressions:
         name = projection.alias_or_name
-        out[name.lower()] = _projection_sources(root, projection)
+        out[name if case_sensitive else name.lower()] = _projection_sources(
+            root, projection, case_sensitive
+        )
     return out
 
 
-def _projection_sources(scope: Scope, projection: exp.Expression) -> set[str]:
+def _projection_sources(
+    scope: Scope, projection: exp.Expression, case_sensitive: bool = False
+) -> set[str]:
+    normalize = (lambda value: value) if case_sensitive else str.lower
     found: set[str] = set()
     for column in projection.find_all(exp.Column):
         source = scope.sources.get(column.table)
         if isinstance(source, exp.Table):
-            found.add(f"{_table_key(source)}.{column.name.lower()}")
+            found.add(f"{_table_key(source, case_sensitive)}.{normalize(column.name)}")
         elif isinstance(source, Scope):
             select = source.expression
             if isinstance(select, exp.Select):
                 for inner in select.expressions:
-                    if inner.alias_or_name.lower() == column.name.lower():
-                        found |= _projection_sources(source, inner)
+                    if normalize(inner.alias_or_name) == normalize(column.name):
+                        found |= _projection_sources(source, inner, case_sensitive)
+    return found
+
+
+def _native_lineage(query: exp.Query, case_sensitive: bool = False) -> dict[str, set[str]]:
+    root = build_scope(query)
+    if root is None:
+        return {}
+    normalize = str if case_sensitive else str.lower
+    return {
+        normalize(projection.alias_or_name): _output_sources(root, index, case_sensitive, set())
+        for index, projection in enumerate(query.selects)
+    }
+
+
+def _output_sources(
+    scope: Scope, index: int, case_sensitive: bool, visiting: set[tuple[int, int]]
+) -> set[str]:
+    key = (id(scope), index)
+    if key in visiting:
+        return set()
+    visiting = visiting | {key}
+    if isinstance(scope.expression, exp.SetOperation):
+        return set().union(
+            *(
+                _output_sources(branch, index, case_sensitive, visiting)
+                for branch in scope.union_scopes
+            )
+        )
+    if not isinstance(scope.expression, exp.Select) or index >= len(scope.expression.expressions):
+        return set()
+    return _native_projection_sources(
+        scope, scope.expression.expressions[index], case_sensitive, visiting
+    )
+
+
+def _native_projection_sources(
+    scope: Scope,
+    projection: exp.Expression,
+    case_sensitive: bool = False,
+    visiting: set[tuple[int, int]] | None = None,
+) -> set[str]:
+    normalize = str if case_sensitive else str.lower
+    found: set[str] = set()
+    # sqlglot's documented post-order iterator is untyped at this boundary.
+    traverse = cast("Callable[[], Iterator[Scope]]", scope.traverse)
+    scopes = {id(child.expression): child for child in traverse()}
+    for column in projection.find_all(exp.Column):
+        # Scalar subqueries have their own aliases; correlated references walk
+        # out to their enclosing scope. Never resolve a nested alias as outer.
+        owner = scopes.get(id(column.find_ancestor(exp.Select)), scope)
+        source = owner.sources.get(column.table)
+        while source is None and owner.parent is not None:
+            owner = owner.parent
+            source = owner.sources.get(column.table)
+        if isinstance(source, exp.Table):
+            found.add(f"{_table_key(source, case_sensitive)}.{normalize(column.name)}")
+        elif isinstance(source, Scope) and isinstance(source.expression, exp.Query):
+            for index, inner in enumerate(source.expression.selects):
+                if normalize(inner.alias_or_name) == normalize(column.name):
+                    found |= _output_sources(source, index, case_sensitive, visiting or set())
     return found
