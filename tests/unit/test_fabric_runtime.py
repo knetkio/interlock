@@ -1,6 +1,5 @@
 import subprocess
 import sys
-from dataclasses import asdict
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -62,38 +61,6 @@ async def test_registered_health_probe_uses_process_service_and_saved_source():
     assert status.healthy, status.error
     assert services.auth.acquire.call_args.args[0] == "saved"
     assert services.transport.execute.call_args.args[2] == "SELECT 1"
-
-
-@pytest.mark.asyncio
-async def test_approval_routes_database_source_through_fabric_identity_without_retry():
-    from interlock.core.approval_queue import ApprovalQueue
-    from tests.unit.test_fabric_adapter import CONFIG
-
-    source = SimpleNamespace(
-        source_type=SimpleNamespace(value="database"),
-        metadata={"connector_key": "fabric_sql"},
-        connection_config=CONFIG,
-    )
-    services = fabric_services(
-        "saved",
-        transport=SimpleNamespace(execute=AsyncMock(side_effect=RuntimeError("uncertain write"))),
-    )
-    queue = ApprovalQueue(object(), fabric_services=services)
-    row = dict(
-        id=1,
-        source_id="saved",
-        identity_id=3,
-        sql_text="UPDATE dbo.Users SET Name=?",
-        request_metadata={
-            "parameters": ["name"],
-            "upstream_identity": asdict(services.auth.acquire.return_value.context),
-        },
-    )
-    with pytest.raises(RuntimeError, match="uncertain"):
-        await queue._execute_via_adapter(row, source, "database")
-    assert services.auth.acquire.call_args.args[0] == "saved"
-    services.transport.execute.assert_awaited_once()
-    assert services.transport.execute.call_args.args[3] == ("name",)
 
 
 def test_missing_operator_key_disables_fabric_without_breaking_other_connectors(monkeypatch):

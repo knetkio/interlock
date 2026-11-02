@@ -1,0 +1,31 @@
+# Synthetic packaging smoke only. Always use a separate -p interlock-fabric-task8.
+# !override prevents inherited quickstart ports from binding the original stack.
+services:
+  admin:
+    image: interlock-fabric-task8:arm64-production
+    ports: !override ["127.0.0.1:29090:9090"]
+    environment:
+      INTERLOCK_ADMIN__BOOTSTRAP_PASSWORD: "fabric-e2e-password"
+      INTERLOCK_ADMIN__CATALOG_ON_STARTUP: "false"
+      ANTHROPIC_API_KEY: ""
+      MISTRAL_API_KEY: ""
+  gateway:
+    image: interlock-fabric-task8:arm64-production
+    ports: !override ["127.0.0.1:23001:3000", "127.0.0.1:25434:5432"]
+    environment:
+      ANTHROPIC_API_KEY: ""
+      MISTRAL_API_KEY: ""
+  migration:
+    image: interlock-fabric-task8:arm64-production
+  worker-1:
+    environment:
+      ANTHROPIC_API_KEY: ""
+      MISTRAL_API_KEY: ""
+  worker-2:
+    environment:
+      ANTHROPIC_API_KEY: ""
+      MISTRAL_API_KEY: ""
+  postgres:
+    ports: !override ["127.0.0.1:25433:5432"]
+  redis:
+    ports: !override ["127.0.0.1:26380:6379"]

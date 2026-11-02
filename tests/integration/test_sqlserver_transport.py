@@ -1,12 +1,13 @@
-"""Opt-in native Driver 18 proof against an explicitly designated disposable DB.
+"""Opt-in native probes using the explicit saved-source Fabric live manifest.
 
-Run only with FABRIC_SQL_INTEGRATION=1, FABRIC_SQL_TEST_HOST,
-FABRIC_SQL_TEST_DATABASE, FABRIC_SQL_TEST_TOKEN (short-lived Entra SQL token), and
-FABRIC_SQL_TEST_CUSTOMER_CHECKED=1 after the project's customer selector and
-identity/workspace/database have been verified. Never point at production: the
-transaction test creates/drops a uniquely named table. No global login fallback.
-Requires Microsoft ODBC Driver 18 and a test identity with CREATE TABLE rights.
-No SQL Server/Fabric endpoint is configured by the unit-test suite.
+Requires FABRIC_SQL_INTEGRATION=1 plus FABRIC_LIVE_MANIFEST and ordinary explicit
+control DB/key settings. Never accepts a pasted access token or a global login.
+Writes require FABRIC_SQL_WRITE_SOURCE_ID matching the designated source AND
+FABRIC_SQL_DISPOSABLE_WRITE_AUTHORIZED=1: permission to create/drop a uniquely
+named dbo.interlock_transport_test_* table in that disposable SQL Database.
+Cancellation server-observation additionally requires explicit authorization to
+query sys.dm_exec_requests (FABRIC_SQL_OBSERVE_SESSION_AUTHORIZED=1). Without
+it, report cancellation acceptance pending; do not silently require DBA grants.
 """
 
 from __future__ import annotations
@@ -16,60 +17,35 @@ import os
 import struct
 import time
 import uuid
+from types import SimpleNamespace
 
 import pytest
 
-from interlock.connections.fabric.auth import FabricToken
-from interlock.connections.fabric.config import FabricConfig
-from interlock.connections.fabric.credentials import FabricCredentialContext
 from interlock.connections.sqlserver import SqlServerResultLimitError, SqlServerTransport
 from interlock.security.egress import validate_host_egress
+from tests.integration.test_fabric_live import native_cell as native_cell
 
 pytestmark = [
     pytest.mark.live,
     pytest.mark.skipif(
         os.environ.get("FABRIC_SQL_INTEGRATION") != "1",
-        reason="No opt-in SQL Server/Fabric test endpoint: FABRIC_SQL_INTEGRATION != 1",
+        reason="UNVERIFIED: FABRIC_SQL_INTEGRATION != 1",
+    ),
+    pytest.mark.parametrize(
+        "native_cell",
+        [("sql_database", "oauth"), ("sql_database", "spn")],
+        indirect=True,
+        ids=["sql-database-oauth", "sql-database-spn"],
     ),
 ]
 
 
 @pytest.fixture
-def endpoint():
-    if os.environ.get("FABRIC_SQL_TEST_CUSTOMER_CHECKED") != "1":
-        pytest.fail("Verify project customer, identity and disposable database before native tests")
-    required = ["FABRIC_SQL_TEST_HOST", "FABRIC_SQL_TEST_DATABASE", "FABRIC_SQL_TEST_TOKEN"]
-    if any(not os.environ.get(key) for key in required):
-        pytest.fail("Explicit disposable SQL endpoint/database/token are required")
+async def endpoint(native_cell):
+    cell, config, services = native_cell
+    source = await services.prepare_source(cell.source_id, config)
     driver = pytest.importorskip("pyodbc")
-    if "ODBC Driver 18 for SQL Server" not in driver.drivers():
-        pytest.skip("Microsoft ODBC Driver 18 for SQL Server is not installed")
-    config = FabricConfig.from_mapping(
-        dict(
-            host=os.environ["FABRIC_SQL_TEST_HOST"],
-            database=os.environ["FABRIC_SQL_TEST_DATABASE"],
-            tenant_id="explicit-test-tenant",
-            client_id="explicit-test-client",
-            endpoint_type=os.environ.get("FABRIC_SQL_TEST_ENDPOINT_TYPE", "sql_database"),
-            auth_mode="oauth",
-            allow_private_egress=os.environ.get("FABRIC_SQL_TEST_PRIVATE") == "1",
-        )
-    )
-    # This test token is explicitly supplied, never acquired from ambient identity.
-    token = FabricToken(
-        access_token=os.environ["FABRIC_SQL_TEST_TOKEN"],
-        expires_at=time.time() + 3600,
-        context=FabricCredentialContext(
-            source_id="explicit-native-test",
-            generation=1,
-            tenant_id=config.tenant_id,
-            client_id=config.client_id,
-            account_id=None,
-            auth_mode="oauth",
-            status="connected",
-        ),
-    )
-    return config, token, driver
+    return cell, config, source.token, driver
 
 
 @pytest.fixture
@@ -80,7 +56,12 @@ async def transport():
 
 
 async def test_native_output_limit_rolls_back_and_valid_output_commits(endpoint, transport):
-    config, token, driver = endpoint
+    cell, config, token, driver = endpoint
+    if (
+        os.environ.get("FABRIC_SQL_DISPOSABLE_WRITE_AUTHORIZED") != "1"
+        or os.environ.get("FABRIC_SQL_WRITE_SOURCE_ID") != cell.source_id
+    ):
+        pytest.skip("PENDING: explicit disposable-object write authorization absent")
     # Only fixture setup/teardown use direct DDL; runtime transport remains SQL-agnostic.
     table = "[dbo].[interlock_transport_test_" + uuid.uuid4().hex + "]"
     raw_token = token.access_token.encode("utf-16-le")
@@ -128,29 +109,93 @@ async def test_native_output_limit_rolls_back_and_valid_output_commits(endpoint,
                 setup.close()
 
 
-async def test_native_cancellation_returns_and_transport_can_execute_again(endpoint, transport):
-    config, token, _ = endpoint
-    if config.endpoint_type != "sql_database":
-        pytest.skip("WAITFOR cancellation probe targets SQL Database/SQL Server only")
+class _TrackedHandle:
+    """Test-only observer: record successful native close, never infer it from return latency."""
+
+    def __init__(self, handle):
+        object.__setattr__(self, "handle", handle)
+        object.__setattr__(self, "closed", False)
+        object.__setattr__(self, "cursors", [])
+
+    def __getattr__(self, name):
+        return getattr(self.handle, name)
+
+    def __setattr__(self, name, value):
+        setattr(self.handle, name, value)
+
+    def cursor(self):
+        wrapped = _TrackedHandle(self.handle.cursor())
+        self.cursors.append(wrapped)
+        return wrapped
+
+    def close(self):
+        self.handle.close()
+        object.__setattr__(self, "closed", True)
+
+
+async def test_native_cancellation_closes_handles_worker_and_server_request(endpoint, transport):
+    _, config, token, driver = endpoint
+    if os.environ.get("FABRIC_SQL_OBSERVE_SESSION_AUTHORIZED") != "1":
+        pytest.skip("PENDING: server request observation not explicitly authorized")
+    native_connect = driver.connect
+    handles = []
+    sessions = []
+
+    def tracked_connect(*args, **kwargs):
+        connection = native_connect(*args, **kwargs)
+        cursor = connection.cursor()
+        try:
+            cursor.execute("SELECT @@SPID")
+            sessions.append(int(cursor.fetchone()[0]))
+        finally:
+            cursor.close()
+        connection.rollback()
+        wrapped = _TrackedHandle(connection)
+        handles.append(wrapped)
+        return wrapped
+
+    transport._driver = SimpleNamespace(connect=tracked_connect)
     task = asyncio.create_task(
         transport.execute(
-            config,
-            token,
-            "WAITFOR DELAY '00:00:20'; SELECT 1 AS value",
-            (),
-            write=False,
+            config, token, "WAITFOR DELAY '00:00:20'; SELECT 1 AS value", (), write=False
         )
     )
     try:
+        deadline = time.monotonic() + config.connect_timeout_seconds + 2
+        while not sessions and not task.done() and time.monotonic() < deadline:
+            await asyncio.sleep(0.05)
+        assert sessions and not task.done(), "Native statement never became observable"
         await asyncio.sleep(0.5)
-        assert not task.done(), "Native cancellation probe completed before cancellation"
+        observed = await transport.execute(
+            config,
+            token,
+            "SELECT session_id FROM sys.dm_exec_requests WHERE session_id = ?",
+            (sessions[0],),
+            write=False,
+        )
+        assert observed["rows"] == [
+            {"session_id": sessions[0]}
+        ], "Observer cannot establish the original request is active; cleanup unverified"
         started = time.monotonic()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
         assert time.monotonic() - started < 7
-        result = await transport.execute(config, token, "SELECT 7 AS value", (), write=False)
-        assert result["rows"] == [{"value": 7}]
+        # A spare worker cannot make this pass: the original future must finish,
+        # native close calls must return successfully, and its server request must disappear.
+        deadline = time.monotonic() + 5
+        while transport._running and time.monotonic() < deadline:
+            await asyncio.sleep(0.05)
+        assert not transport._running, "Original native worker still running"
+        assert all(h.closed and all(c.closed for c in h.cursors) for h in handles)
+        result = await transport.execute(
+            config,
+            token,
+            "SELECT session_id FROM sys.dm_exec_requests WHERE session_id = ?",
+            (sessions[0],),
+            write=False,
+        )
+        assert result["rows"] == [], "Cancelled server operation remains active"
     finally:
         if not task.done():
             task.cancel()

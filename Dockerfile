@@ -26,7 +26,7 @@ ENV UV_COMPILE_BYTECODE=1 \
     UV_PYTHON_DOWNLOADS=never
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends gcc libpq-dev && \
+    apt-get install -y --no-install-recommends gcc g++ libpq-dev unixodbc-dev && \
     rm -rf /var/lib/apt/lists/* && \
     pip install --no-cache-dir "uv==${UV_VERSION}"
 
@@ -50,7 +50,19 @@ WORKDIR /app
 # published Debian security fix can be missing from it for days.
 RUN apt-get update && \
     apt-get upgrade -y --no-install-recommends && \
-    apt-get install -y --no-install-recommends libpq5 && \
+    apt-get install -y --no-install-recommends libpq5 ca-certificates curl libgssapi-krb5-2 && \
+    . /etc/os-release && \
+    test "$ID" = debian && \
+    case "$VERSION_ID" in 11|12|13) ;; *) exit 1 ;; esac && \
+    case "$(dpkg --print-architecture)" in amd64|arm64) ;; *) exit 1 ;; esac && \
+    curl --fail --silent --show-error --location \
+      "https://packages.microsoft.com/config/debian/${VERSION_ID}/packages-microsoft-prod.deb" \
+      --output /tmp/packages-microsoft-prod.deb && \
+    dpkg -i /tmp/packages-microsoft-prod.deb && \
+    apt-get update && \
+    ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql18 && \
+    apt-get purge -y --auto-remove curl && \
+    rm -f /tmp/packages-microsoft-prod.deb && \
     rm -rf /var/lib/apt/lists/* && \
     groupadd --gid 1000 interlock && \
     useradd --uid 1000 --gid interlock --shell /bin/false --create-home interlock && \

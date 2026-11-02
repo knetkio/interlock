@@ -18,6 +18,7 @@ What each status means, and what has been certified, is in the [connector suppor
 | [Google BigQuery](/reference/connectors/bigquery/) | `bigquery` | planned | no |   |
 | [DigitalOcean Spaces](/reference/connectors/digitalocean_spaces/) | `digitalocean_spaces` | native | no |   |
 | [Elasticsearch](/reference/connectors/elasticsearch/) | `elasticsearch` | native | no | governance not exercised by any test stack |
+| [Microsoft Fabric SQL](/reference/connectors/fabric_sql/) | `fabric_sql` | beta | no |   |
 | [HTTP / REST](/reference/connectors/generic_rest/) | `generic_rest` | production | yes |   |
 | [GitHub](/reference/connectors/github/) | `github` | native | yes | governance not exercised by any test stack |
 | [GitLab](/reference/connectors/gitlab/) | `gitlab` | native | no | governance not exercised by any test stack |

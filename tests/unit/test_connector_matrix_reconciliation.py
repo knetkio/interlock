@@ -17,6 +17,7 @@ from tests.unit.docs_site import body
 # How the matrix names each connector. A new connector must be added here, and
 # to the matrix, before this test passes.
 MATRIX_LABEL = {
+    "fabric_sql": "Microsoft Fabric SQL",
     "postgresql": "PostgreSQL",
     "mysql": "MySQL/MariaDB",
     "mariadb": "MySQL/MariaDB",

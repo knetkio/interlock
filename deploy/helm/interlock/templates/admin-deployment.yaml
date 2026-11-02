@@ -76,6 +76,7 @@ spec:
                   name: {{ required "auth.oidc.adminClientSecretExistingSecret is required when OIDC is enabled" .Values.auth.oidc.adminClientSecretExistingSecret }}
                   key: {{ .Values.auth.oidc.adminClientSecretKey }}
             {{- end }}
+            {{- include "interlock.fabricEnv" . | nindent 12 }}
             {{- include "interlock.redisEnv" . | nindent 12 }}
             {{- with .Values.admin.extraEnv }}
             {{- toYaml . | nindent 12 }}
@@ -95,6 +96,11 @@ spec:
           resources:
             {{- toYaml .Values.admin.resources | nindent 12 }}
           volumeMounts:
+            {{- if .Values.fabric.enabled }}
+            - name: fabric-secrets
+              mountPath: /run/secrets/fabric
+              readOnly: true
+            {{- end }}
             - name: tmp
               mountPath: /tmp
             - name: home
@@ -103,6 +109,12 @@ spec:
               mountPath: /run/secrets/control-db-ca
               readOnly: true
       volumes:
+        {{- if .Values.fabric.enabled }}
+        - name: fabric-secrets
+          secret:
+            secretName: {{ .Values.fabric.existingSecret }}
+            defaultMode: 0440
+        {{- end }}
         - name: tmp
           emptyDir: {}
         - name: home

@@ -3133,6 +3133,170 @@
         ]
       }
     },
+    "/api/data-sources/{source_id}/fabric/auth-status": {
+      "get": {
+        "operationId": "status_api_data_sources__source_id__fabric_auth_status_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "source_id",
+            "required": true,
+            "schema": {
+              "title": "Source Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Status Api Data Sources  Source Id  Fabric Auth Status Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Status",
+        "tags": [
+          "fabric"
+        ]
+      }
+    },
+    "/api/data-sources/{source_id}/fabric/connect": {
+      "post": {
+        "operationId": "connect_api_data_sources__source_id__fabric_connect_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "source_id",
+            "required": true,
+            "schema": {
+              "title": "Source Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Connect",
+        "tags": [
+          "fabric"
+        ]
+      }
+    },
+    "/api/data-sources/{source_id}/fabric/disconnect": {
+      "post": {
+        "operationId": "disconnect_api_data_sources__source_id__fabric_disconnect_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "source_id",
+            "required": true,
+            "schema": {
+              "title": "Source Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Disconnect",
+        "tags": [
+          "fabric"
+        ]
+      }
+    },
+    "/api/data-sources/{source_id}/fabric/rotate": {
+      "post": {
+        "operationId": "rotate_api_data_sources__source_id__fabric_rotate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "source_id",
+            "required": true,
+            "schema": {
+              "title": "Source Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Rotate",
+        "tags": [
+          "fabric"
+        ]
+      }
+    },
     "/api/data-sources/{source_id}/test": {
       "post": {
         "description": "Probe a previously registered source.",
@@ -3173,6 +3337,25 @@
         "summary": "Test Registered Source",
         "tags": [
           "data-sources"
+        ]
+      }
+    },
+    "/api/fabric/oauth/callback": {
+      "get": {
+        "operationId": "callback_api_fabric_oauth_callback_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Callback",
+        "tags": [
+          "fabric"
         ]
       }
     },

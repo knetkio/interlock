@@ -38,7 +38,12 @@ The console and its JSON API share one server. Every route except the public one
 | PUT | `/api/data-sources/{source_id}` | owner, admin, security_admin, source_admin |   |
 | GET | `/api/data-sources/{source_id}/catalog/scans` | owner, admin, security_admin, source_admin, viewer | The source's recent scans, newest first. |
 | POST | `/api/data-sources/{source_id}/catalog/scans` | owner, admin, security_admin, source_admin | Queue a scan of the source's structure now, rather than waiting for the |
+| GET | `/api/data-sources/{source_id}/fabric/auth-status` | owner, admin, security_admin, source_admin, viewer |   |
+| POST | `/api/data-sources/{source_id}/fabric/connect` | owner, admin, security_admin, source_admin |   |
+| POST | `/api/data-sources/{source_id}/fabric/disconnect` | owner, admin, security_admin, source_admin |   |
+| POST | `/api/data-sources/{source_id}/fabric/rotate` | owner, admin, security_admin, source_admin |   |
 | POST | `/api/data-sources/{source_id}/test` | owner, admin, security_admin, source_admin | Probe a previously registered source. |
+| GET | `/api/fabric/oauth/callback` | owner, admin, security_admin, source_admin |   |
 | GET | `/api/identities` | owner, admin, security_admin, viewer |   |
 | POST | `/api/identities` | owner, admin, security_admin |   |
 | DELETE | `/api/identities/{identity_id}` | owner, admin, security_admin |   |

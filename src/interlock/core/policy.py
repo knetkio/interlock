@@ -239,11 +239,10 @@ class PolicyEngine:
 
         # Fabric comparison is supplied by trusted source catalog naming. None
         # preserves the legacy comparison used by every other connector.
-        normalize = (
-            (lambda value: str(value).strip())
-            if identifier_case_sensitive
-            else (lambda value: str(value).strip().lower())
-        )
+        def normalize(value: object) -> str:
+            text = str(value).strip()
+            return text if identifier_case_sensitive else text.lower()
+
         if identifier_case_sensitive is not None:
             tables = [normalize(t) for t in tables or []]
             columns = [normalize(c) for c in columns or []]

@@ -362,7 +362,7 @@ def test_supply_chain_cve_remediation_is_documented_and_pinned() -> None:
     assert (
         "production-worker = "
         '["interlock-runtime[pii,vector,ingestion,otel,connectors-tier1,connectors-repo,'
-        'connectors-published-saas]"]' in pyproject
+        'connectors-published-saas,fabric-sql]"]' in pyproject
     )
     assert 'production-worker-ml = ["interlock-runtime[production-worker,ml]"]' in pyproject
 

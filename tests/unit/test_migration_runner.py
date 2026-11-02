@@ -192,9 +192,12 @@ async def test_migrations_upgrade_from_004_fixture_to_head() -> None:
         "017_identity_tombstones.sql",
         "018_connector_activation.sql",
         "019_admin_password_change.sql",
+        "020_fabric_credentials.sql",
+        "021_fabric_source_lifecycle.sql",
+        "022_fabric_connector_resolution.sql",
     ]
     assert result.skipped == []
-    assert set(conn.rows) == {f"{version:03d}" for version in range(1, 20)}
+    assert set(conn.rows) == {f"{version:03d}" for version in range(1, 23)}
 
 
 @pytest.mark.asyncio
@@ -213,6 +216,9 @@ async def test_migrations_baseline_modern_legacy_database_to_head() -> None:
         "017_identity_tombstones.sql",
         "018_connector_activation.sql",
         "019_admin_password_change.sql",
+        "020_fabric_credentials.sql",
+        "021_fabric_source_lifecycle.sql",
+        "022_fabric_connector_resolution.sql",
     ]
     assert result.skipped == []
     assert result.baselined == [
@@ -227,7 +233,7 @@ async def test_migrations_baseline_modern_legacy_database_to_head() -> None:
         "009_enterprise_connectors.sql",
         "010_audit_partition_durability.sql",
     ]
-    assert set(conn.rows) == {f"{version:03d}" for version in range(1, 20)}
+    assert set(conn.rows) == {f"{version:03d}" for version in range(1, 23)}
 
 
 @pytest.mark.asyncio
@@ -251,6 +257,9 @@ async def test_migrations_do_not_replay_role_alignment_when_008_marker_exists() 
         "017_identity_tombstones.sql",
         "018_connector_activation.sql",
         "019_admin_password_change.sql",
+        "020_fabric_credentials.sql",
+        "021_fabric_source_lifecycle.sql",
+        "022_fabric_connector_resolution.sql",
     ]
 
 

@@ -112,3 +112,29 @@ supplied through extraEnvFrom, still needs a `kubectl rollout restart`.
 {{- define "interlock.podAnnotations" -}}
 checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
 {{- end }}
+
+{{/* Shared settings and file references; secret values never enter rendered YAML. */}}
+{{- define "interlock.fabricEnv" -}}
+{{- if .Values.fabric.enabled }}
+{{- $refs := dict }}
+{{- range .Values.fabric.keyVersions }}
+{{- $_ := set $refs . (printf "file:///run/secrets/fabric/key-%s" .) }}
+{{- end }}
+- name: INTERLOCK_FABRIC__ACTIVE_KEY_VERSION
+  value: {{ .Values.fabric.activeKeyVersion | quote }}
+- name: INTERLOCK_FABRIC__KEY_REFS
+  value: {{ $refs | toJson | quote }}
+{{- if .Values.fabric.oauthClientId }}
+- name: INTERLOCK_FABRIC__OAUTH_CLIENT_ID
+  value: {{ .Values.fabric.oauthClientId | quote }}
+- name: INTERLOCK_FABRIC__OAUTH_REDIRECT_URI
+  value: {{ required "fabric.oauthRedirectUri is required with OAuth" .Values.fabric.oauthRedirectUri | quote }}
+- name: INTERLOCK_FABRIC__OAUTH_ALLOWED_TENANTS
+  value: {{ .Values.fabric.oauthAllowedTenants | toJson | quote }}
+{{- if .Values.fabric.oauthClientSecretKey }}
+- name: INTERLOCK_FABRIC__OAUTH_CLIENT_SECRET_REF
+  value: {{ printf "file:///run/secrets/fabric/%s" .Values.fabric.oauthClientSecretKey | quote }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

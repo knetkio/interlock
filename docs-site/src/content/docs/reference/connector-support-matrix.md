@@ -6,7 +6,7 @@ sidebar:
   order: 1
 ---
 
-Last reviewed: 2026-09-08
+Last reviewed: 2026-11-02
 
 This matrix is the public V1 support contract. Capability labels are
 conservative: code presence or a mocked probe does not make a connector stable.
@@ -44,6 +44,7 @@ PostgreSQL protocol details are in
 
 | Connector | Family | V1 beta capability | Writes | Certification |
 | --- | --- | --- | --- | --- |
+| Microsoft Fabric SQL | Database | Warehouse, Lakehouse SQL analytics and SQL Database; saved-user OAuth/SPN, governed query and visible catalog | Lakehouse read-only; Warehouse/SQL Database restricted table DML, approval/policy enforced | Packaged/test-covered; all six native endpoint/auth cells unverified. [Setup and limits](/guides/fabric-sql/) |
 | Slack | Collaboration | Scoped channels, messages, threads, files, discovery | Disabled | Mock/local; **live certified** for read, discovery, role denial, redaction, audit |
 | GitHub | Repository | Scoped repository metadata, issues, pull requests, selected code paths, discovery | Disabled unless a separately certified action is enabled | Mock/local; live-gated |
 | GitLab | Repository | Scoped groups/projects, issues, merge requests, selected code paths, discovery | Disabled unless a separately certified action is enabled | Mock/local; live-gated |

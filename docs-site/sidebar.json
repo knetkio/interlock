@@ -67,6 +67,9 @@
       },
       {
         "slug": "guides/troubleshooting"
+      },
+      {
+        "slug": "guides/fabric-sql"
       }
     ]
   },

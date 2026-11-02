@@ -201,17 +201,39 @@ async def test_invalidation_queued_during_refresh_prevents_delivery_of_old_gener
     behavior.entered, behavior.release = threading.Event(), threading.Event()
     refresh = asyncio.create_task(FabricAuth(store, settings).acquire("one", config))
     assert await asyncio.to_thread(behavior.entered.wait, 2)
-    other_store = FabricCredentialStore(pool, keys)
-    revoke = asyncio.create_task(
-        other_store.invalidate("one", reason="disconnect", delete_cache=True)
-    )
-    await asyncio.sleep(0.03)
-    assert not revoke.done()
-    behavior.release.set()
-    await revoke
-    with pytest.raises(FabricAuthError) as error:
-        await refresh
-    assert error.value.code == "reconnect_required"
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+
+    # A pending asyncio task is not evidence that PostgreSQL has queued its
+    # row lock. Establish the actual waiter before releasing the refresh.
+    async with pool.acquire() as revoke_connection:
+        revoke_pid = await revoke_connection.fetchval("SELECT pg_backend_pid()")
+
+        @asynccontextmanager
+        async def acquire_revoke_connection():
+            yield revoke_connection
+
+        other_store = FabricCredentialStore(
+            SimpleNamespace(acquire=acquire_revoke_connection), keys
+        )
+        revoke = asyncio.create_task(
+            other_store.invalidate("one", reason="disconnect", delete_cache=True)
+        )
+        try:
+            async with asyncio.timeout(5):
+                while not await pool.fetchval(
+                    "SELECT cardinality(pg_blocking_pids($1)) > 0", revoke_pid
+                ):
+                    assert not revoke.done(), "Revocation finished before entering the lock queue"
+                    await asyncio.sleep(0.01)
+            behavior.release.set()
+            await revoke
+            with pytest.raises(FabricAuthError) as error:
+                await refresh
+            assert error.value.code == "reconnect_required"
+        finally:
+            behavior.release.set()
+            await asyncio.gather(refresh, revoke, return_exceptions=True)
     row = await pool.fetchrow("SELECT * FROM fabric_credentials")
     assert row["encrypted_cache"] is None and row["status"] == "disconnected"
 

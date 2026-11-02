@@ -22,8 +22,9 @@ whole table.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
+from typing import cast
 
 import sqlglot
 from sqlglot import exp
@@ -385,7 +386,9 @@ def _native_projection_sources(
 ) -> set[str]:
     normalize = str if case_sensitive else str.lower
     found: set[str] = set()
-    scopes = {id(child.expression): child for child in scope.traverse()}
+    # sqlglot's documented post-order iterator is untyped at this boundary.
+    traverse = cast("Callable[[], Iterator[Scope]]", scope.traverse)
+    scopes = {id(child.expression): child for child in traverse()}
     for column in projection.find_all(exp.Column):
         # Scalar subqueries have their own aliases; correlated references walk
         # out to their enclosing scope. Never resolve a nested alias as outer.
