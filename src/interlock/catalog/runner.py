@@ -18,7 +18,7 @@ import contextlib
 import json
 import logging
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import asyncpg
 
@@ -28,6 +28,9 @@ from interlock.catalog.exposure import record_exposure
 from interlock.catalog.model import ScanLimits
 from interlock.catalog.store import apply_snapshot
 from interlock.config import CatalogConfig
+
+if TYPE_CHECKING:
+    from interlock.connections.fabric.runtime import FabricServices
 
 logger = logging.getLogger(__name__)
 
@@ -100,8 +103,10 @@ class CatalogScanRunner:
         conn_manager: Any,
         config: CatalogConfig,
         worker_id: str,
+        fabric_services: FabricServices | None = None,
         on_scanned: Callable[[str], Awaitable[Any]] | None = None,
     ) -> None:
+        self._fabric_services = fabric_services
         self._on_scanned = on_scanned
         self._pool = pg_pool
         self._registry = registry
@@ -244,6 +249,7 @@ class CatalogScanRunner:
             connection_config=dict(source.connection_config),
             limits=scan_limits(self._config),
             conn_manager=self._conn_manager,
+            fabric_services=self._fabric_services,
         )
         lease = asyncio.create_task(self._renew_lease(scan_id))
         try:

@@ -69,6 +69,8 @@ paths = [
   "src/interlock/connections/fabric/config.py",
   "src/interlock/connections/fabric/credentials.py",
   "src/interlock/connections/fabric/auth.py",
+  "src/interlock/connections/fabric/runtime.py",
+  "src/interlock/connections/fabric/adapter.py",
   "src/interlock/connections/sqlserver.py",
   "src/interlock/connections/activation.py",
   "src/interlock/connections/role_vocabulary.py",
@@ -85,6 +87,8 @@ strict_files = [
   "src/interlock/connections/fabric/config.py",
   "src/interlock/connections/fabric/credentials.py",
   "src/interlock/connections/fabric/auth.py",
+  "src/interlock/connections/fabric/runtime.py",
+  "src/interlock/connections/fabric/adapter.py",
   "src/interlock/connections/sqlserver.py",
 ]
 

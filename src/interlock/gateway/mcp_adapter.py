@@ -681,6 +681,29 @@ class MCPAdapter:
                     _text_content("Unable to resolve the asset source safely"),
                     status_code=503,
                 )
+        source_registry = self._resolve_registry(request)
+        saved_source = (
+            source_registry.get(str(arguments.get("source_id") or ""))
+            if source_registry is not None
+            else None
+        )
+        saved_connector_key = getattr(saved_source, "connector_key", None)
+        if (
+            tool_name == "agentgate_query"
+            and isinstance(sql, str)
+            and saved_source is not None
+            and saved_connector_key == "fabric_sql"
+        ):
+            from interlock.connections.fabric.adapter import FabricSQLAdapter
+
+            fabric_adapter = get_adapter("fabric_sql")
+            assert isinstance(fabric_adapter, FabricSQLAdapter)
+            try:
+                fabric_adapter.validate_sql(
+                    sql, database=saved_source.connection_config.get("database")
+                )
+            except ValueError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=400)
         if tool_name == "agentgate_query" and isinstance(sql, str):
             source_id_for_parse = str(arguments.get("source_id") or "")
             operation = _sql_operation(sql, self._dialect_for_source(request, source_id_for_parse))
@@ -789,7 +812,11 @@ class MCPAdapter:
             path=str(tool_name),
             sql=sql,
             parameters=arguments,
-            metadata={"tool_name": tool_name, "correlation_id": _call_correlation_id(request)},
+            metadata={
+                "tool_name": tool_name,
+                "correlation_id": _call_correlation_id(request),
+                "connector_key": saved_connector_key,
+            },
             tables=tables,
             dialect=self._dialect_for_source(request, str(arguments["source_id"])),
         )
@@ -1020,7 +1047,12 @@ class MCPAdapter:
             registry = self._resolve_registry(request)
             source_config = registry.get(source_id) if registry is not None else None
             if source_config is not None and source_config.source_type.value != "postgresql":
-                adapter = get_adapter(source_config.connector_key, source_config.metadata)
+                adapter = get_adapter(
+                    source_config.connector_key,
+                    source_config.metadata,
+                    fabric_services=getattr(request.app.state, "fabric_services", None),
+                    source_id=source_id,
+                )
                 connector_request = {
                     "source_id": source_id,
                     "identity_id": getattr(identity, "identity_id", None),
@@ -1416,6 +1448,7 @@ class MCPAdapter:
             resource_type="db.table",
             resources=whole_resources,
             aliases=aliases,
+            case_sensitive=naming.identifier_case_sensitive is True,
         )
         readable_columns = await evaluator.allowed_resources(
             identity_id,
@@ -1424,6 +1457,7 @@ class MCPAdapter:
             resource_type="db.column",
             resources=column_resources,
             aliases=aliases,
+            case_sensitive=naming.identifier_case_sensitive is True,
         )
         policy = getattr(state, "policy_engine", None)
         listed: list[dict[str, Any]] = []
@@ -1444,6 +1478,11 @@ class MCPAdapter:
                     operation="read",
                     tables=[table],
                     deny_table_spellings=table_spellings([resolve_table(table, naming)]),
+                    identifier_case_sensitive=(
+                        naming.identifier_case_sensitive
+                        if naming.connector_key == "fabric_sql"
+                        else None
+                    ),
                 )
                 if not decision.allowed:
                     entry["policy"] = {
@@ -1700,7 +1739,12 @@ class MCPAdapter:
             registry = self._resolve_registry(request)
             source_config = registry.get(source_id) if registry is not None and source_id else None
             if source_config is not None and source_config.source_type.value != "postgresql":
-                adapter = get_adapter(source_config.connector_key, source_config.metadata)
+                adapter = get_adapter(
+                    source_config.connector_key,
+                    source_config.metadata,
+                    fabric_services=getattr(request.app.state, "fabric_services", None),
+                    source_id=source_id,
+                )
                 introspection = await adapter.introspect(source_config.connection_config)
                 # Introspection is schema shape rather than row content, so a
                 # detection here is unusual - but a connector is free to

@@ -36,6 +36,7 @@ from interlock.catalog.naming import CatalogNamingResolver
 from interlock.catalog.queue import enqueue_many
 from interlock.config import InterLockConfig, allows_insecure_upstream_tls, load_config
 from interlock.connections.circuit_breaker import CircuitBreakerRegistry
+from interlock.connections.fabric.runtime import build_fabric_services
 from interlock.connections.manager import ConnectionManager
 from interlock.core.approval_queue import ApprovalQueue
 from interlock.core.oidc import OIDCProvider
@@ -357,6 +358,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
 
     circuit_breakers = CircuitBreakerRegistry()
+    fabric_services = build_fabric_services(app.state.pg_pool, config.fabric)
+    app.state.fabric_services = fabric_services
     conn_manager = ConnectionManager(
         registry,
         circuit_breakers=circuit_breakers,
@@ -364,6 +367,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         # one stored source cannot be refused on one protocol and served
         # on another.
         allow_insecure_upstream_tls=allows_insecure_upstream_tls(config),
+        fabric_services=fabric_services,
     )
     app.state.conn_manager = conn_manager
     # The Admin resolves approvals, so it emits the approved, rejected and
@@ -377,6 +381,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         cache_invalidator=cache_invalidator,
         registry=registry,
         notifier=approval_notifier,
+        fabric_services=fabric_services,
         expiry_sweep_interval_seconds=config.approvals.expiry_sweep_interval_seconds,
     )
     app.state.approval_queue = approval_queue
@@ -418,6 +423,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         if approval_notifier is not None:
             await approval_notifier.aclose()
         await conn_manager.close_all()
+        if fabric_services is not None:
+            await fabric_services.close()
         await close_pg_pool(app.state.pg_pool)
         await close_redis_client(app.state.redis)
 

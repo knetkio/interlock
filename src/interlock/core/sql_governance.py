@@ -65,6 +65,11 @@ class SqlNaming:
     # before the source's first scan.
     columns: Mapping[tuple[str, str], tuple[str, ...]] | None = None
 
+    identifier_case_sensitive: bool | None = None
+
+    def identifier(self, value: str) -> str:
+        return value if self.identifier_case_sensitive is True else value.lower()
+
     @property
     def dialect(self) -> str:
         return dialect_for(self.connector_key)
@@ -94,6 +99,19 @@ def naming_for(
     config = connection_config or {}
     facts = catalog_attributes or {}
     key = str(connector_key or "").lower()
+    if key == "fabric_sql":
+        case_sensitive = facts.get("identifier_case_sensitive")
+        if not isinstance(case_sensitive, bool):
+            case_sensitive = None
+        return SqlNaming(
+            connector_key=key,
+            default_schema=str(facts.get("default_schema") or ""),
+            search_path=(),
+            database=str(facts.get("database") or config.get("database") or "") or None,
+            known_tables=known_tables,
+            columns=columns,
+            identifier_case_sensitive=case_sensitive,
+        )
     if key in _MYSQL:
         database = _lower(facts.get("default_schema") or config.get("database"))
         default = database or LEGACY_SCHEMA
@@ -147,10 +165,57 @@ class ResolvedTable:
     shadows: tuple[str, ...] = ()
     resolved: bool = False
     refusal: str | None = None
+    case_sensitive: bool = False
 
 
 def resolve_table(written: str, naming: SqlNaming) -> ResolvedTable:
     """Resolve a table reference as written in SQL to `schema.table`."""
+    if naming.connector_key == "fabric_sql":
+        parts = written.split(".")
+        canonical = written
+        refusal = None
+        if (
+            naming.identifier_case_sensitive is None
+            or not naming.default_schema
+            or not naming.catalogued
+        ):
+            refusal = "Fabric catalog required: identifier collation, default schema, and native tables must be known"
+        elif len(parts) > 3 or any(
+            not p or p != p.strip() or any(c in p for c in '[]"`*?') for p in parts
+        ):
+            refusal = "Ambiguous Fabric table scope"
+        elif naming.identifier_case_sensitive is False and any(not p.isascii() for p in parts):
+            refusal = "Fabric CI identifier equivalence is supported only for ASCII identifiers"
+        else:
+            if len(parts) == 3:
+                if naming.identifier(parts[0]) != naming.identifier(naming.database or ""):
+                    refusal = "Cross-database Fabric table scope refused"
+                parts = parts[1:]
+            if len(parts) == 1:
+                parts.insert(0, naming.default_schema)
+            matches = [
+                pair
+                for pair in naming.known_tables or ()
+                if tuple(naming.identifier(p) for p in pair)
+                == tuple(naming.identifier(p) for p in parts)
+            ]
+            if len(matches) != 1:
+                refusal = refusal or "Fabric table scope is absent or ambiguous in the catalog"
+            else:
+                canonical = ".".join(matches[0])
+                if any(
+                    p != p.strip()
+                    or (naming.identifier_case_sensitive is False and not p.isascii())
+                    for p in matches[0]
+                ):
+                    refusal = "Unsupported Fabric catalog identifier equivalence"
+        return ResolvedTable(
+            written=written,
+            canonical=canonical,
+            resolved=not refusal,
+            refusal=refusal,
+            case_sensitive=naming.identifier_case_sensitive is not False,
+        )
     parts = [part.strip().strip('"`').lower() for part in written.split(".") if part.strip()]
     if not parts:
         return ResolvedTable(written=written, canonical=written.lower())
@@ -304,7 +369,7 @@ def table_spellings(resolved: list[ResolvedTable]) -> set[str]:
     """
     spellings: set[str] = set()
     for table in resolved:
-        spellings.add(table.written.lower())
+        spellings.add(table.written if table.case_sensitive else table.written.lower())
         spellings.add(table.canonical)
         spellings.add(table.canonical.rsplit(".", 1)[-1])
         spellings.update(table.aliases)

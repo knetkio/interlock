@@ -20,6 +20,7 @@ from interlock.core.sql_columns import ColumnAccess, column_access
 from interlock.core.sql_governance import (
     governance_inputs,
     legacy_naming,
+    naming_for,
     resolve_table,
     table_spellings,
 )
@@ -305,6 +306,7 @@ class GatewayPipeline:
                 sql=request.sql,
                 deny_table_spellings=view.deny_table_spellings,
                 deny_column_spellings=view.deny_column_spellings,
+                identifier_case_sensitive=view.metadata.get("fabric_identifier_case_sensitive"),
             )
             if not policy_decision.allowed:
                 return GatewayDecision(
@@ -583,17 +585,26 @@ class GatewayPipeline:
             write_classification=write_classification,
         )
         naming = await self._naming_for(request)
+        if naming is not None and naming.connector_key == "fabric_sql":
+            metadata["fabric_identifier_case_sensitive"] = naming.identifier_case_sensitive
+        else:
+            metadata.pop("fabric_identifier_case_sensitive", None)
         columns = request.columns
         column_gaps: dict[str, str] = {}
         lineage: dict[str, set[str]] = {}
         deny_columns: set[str] | None = None
+        scope_refusals: list[str] = []
         if request.sql and naming is not None and not request.columns:
             access = column_access(
                 request.sql,
                 dialect=naming.dialect,
                 resolve=lambda written: resolve_table(written, naming).canonical,
                 catalog=naming.columns,
+                case_sensitive=naming.connector_key == "fabric_sql"
+                and naming.identifier_case_sensitive is not False,
+                native_identifiers=naming.connector_key == "fabric_sql",
             )
+            scope_refusals = access.refusals
             columns, column_gaps = _column_resources(access)
             lineage = access.lineage
             deny_columns = _column_spellings(access)
@@ -612,6 +623,7 @@ class GatewayPipeline:
             naming=naming,
             column_gaps=column_gaps,
         )
+        permission_request.naming_refusals.extend(scope_refusals)
         spellings = (
             table_spellings([resolve_table(table, naming or legacy_naming()) for table in tables])
             if tables
@@ -630,17 +642,22 @@ class GatewayPipeline:
 
     async def _naming_for(self, request: GatewayRequest) -> Any | None:
         """How this source's database resolves table names, when it speaks SQL."""
+        fallback = (
+            naming_for("fabric_sql")
+            if request.metadata.get("connector_key") == "fabric_sql"
+            else None
+        )
         if self._sql_naming is None or not (request.sql or request.tables):
-            return None
+            return fallback
         try:
-            return await self._sql_naming.naming_for_source(request.source_id)
+            return await self._sql_naming.naming_for_source(request.source_id) or fallback
         except Exception:
             logger.warning(
-                "SQL naming unavailable for %s; using legacy naming",
+                "SQL naming unavailable for %s; using connector fallback",
                 request.source_id,
                 exc_info=True,
             )
-            return None
+            return fallback
 
     def _classify_write(self, request: GatewayRequest) -> WriteClassification | None:
         if request.sql and self._write_classifier is not None:

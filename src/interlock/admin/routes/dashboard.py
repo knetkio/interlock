@@ -4796,6 +4796,8 @@ async def policy_dry_run(
     }
     connector = get_connector(source_type, source_metadata)
     deny_spellings: set[str] | None = None
+    deny_column_spellings: set[str] | None = None
+    identifier_case_sensitive: bool | None = None
     if sql and connector.key in _SQL_DRY_RUN_CONNECTORS:
         # The gateway's own derivation - verb, every statement's tables, write
         # classification, catalog naming - so the dry-run explains the decision
@@ -4806,7 +4808,7 @@ async def policy_dry_run(
                 protocol=source_type,
                 source_id=source_id,
                 dialect=dialect_for(connector.key),
-                metadata={"query": sql, **dry_run_metadata},
+                metadata={"query": sql, "connector_key": connector.key, **dry_run_metadata},
             ),
             identity_id=identity.identity_id,
         )
@@ -4815,6 +4817,8 @@ async def policy_dry_run(
         table_list = list(view.tables or [])
         column_list = permission_request.columns
         deny_spellings = view.deny_table_spellings
+        deny_column_spellings = view.deny_column_spellings
+        identifier_case_sensitive = view.metadata.get("fabric_identifier_case_sensitive")
     elif sql:
         permission_request = get_adapter(
             connector.key,
@@ -4823,7 +4827,7 @@ async def policy_dry_run(
             source_id=source_id,
             identity_id=identity.identity_id,
             operation=sql,
-            metadata={"query": sql, **dry_run_metadata},
+            metadata={"query": sql, "connector_key": connector.key, **dry_run_metadata},
         )
         operation = (
             "read"
@@ -4853,6 +4857,8 @@ async def policy_dry_run(
         )
         permission_request = view.permission_request
         deny_spellings = view.deny_table_spellings
+        deny_column_spellings = view.deny_column_spellings
+        identifier_case_sensitive = view.metadata.get("fabric_identifier_case_sensitive")
     source_role_decision = await SourceRoleEvaluator(pool).evaluate(permission_request)
 
     policy_engine = PolicyEngine(pool)
@@ -4865,6 +4871,8 @@ async def policy_dry_run(
         columns=column_list,
         classification_tags=dry_run_metadata["classification_tags"],
         deny_table_spellings=deny_spellings,
+        deny_column_spellings=deny_column_spellings,
+        identifier_case_sensitive=identifier_case_sensitive,
     )
     matched = []
     if policy_decision.rule_id:
@@ -6523,7 +6531,7 @@ async def _wizard_state_from_form(request: Request, form: Any) -> dict[str, Any]
 
 # Connectors whose SQL the gateway governs through its own derivation; the
 # dry-runs take the same path for them.
-_SQL_DRY_RUN_CONNECTORS = frozenset({"postgresql", "mysql", "mariadb", "snowflake"})
+_SQL_DRY_RUN_CONNECTORS = frozenset({"postgresql", "mysql", "mariadb", "snowflake", "fabric_sql"})
 
 
 def _dry_run_pipeline(request: Request) -> GatewayPipeline:

@@ -10,9 +10,12 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from interlock.catalog.model import CatalogSnapshot, ScanLimits
+
+if TYPE_CHECKING:
+    from interlock.connections.fabric.runtime import FabricServices
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +27,7 @@ class CollectContext:
     connection_config: dict[str, Any]
     limits: ScanLimits
     conn_manager: Any = None
+    fabric_services: FabricServices | None = None
 
 
 Collector = Callable[[CollectContext], Awaitable[CatalogSnapshot]]

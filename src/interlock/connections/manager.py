@@ -9,7 +9,7 @@ import logging
 import ssl
 import time
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import asyncpg
 
@@ -35,6 +35,9 @@ from interlock.security.egress import (
     validate_host_egress,
     validate_http_egress_url,
 )
+
+if TYPE_CHECKING:
+    from interlock.connections.fabric.runtime import FabricServices
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +114,9 @@ class ConnectionManager:
         circuit_breakers: CircuitBreakerRegistry | None = None,
         *,
         allow_insecure_upstream_tls: bool = True,
+        fabric_services: FabricServices | None = None,
     ) -> None:
+        self.fabric_services = fabric_services
         self._registry = registry
         self._circuit_breakers = circuit_breakers or CircuitBreakerRegistry()
         # Production refuses an unencrypted or unverified upstream. The gate
@@ -490,7 +495,12 @@ class ConnectionManager:
                     allowed_fields=connector.credential_fields,
                     secret_fields=connector.secret_fields,
                 )
-                adapter = get_adapter(config.source_type.value, config.metadata)
+                adapter = get_adapter(
+                    config.source_type.value,
+                    config.metadata,
+                    fabric_services=self.fabric_services,
+                    source_id=source_id,
+                )
                 status = await adapter.probe(config.connection_config)
                 status.source_id = source_id
                 return status

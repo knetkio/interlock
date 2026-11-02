@@ -25,6 +25,9 @@ from interlock.notifications.service import ApprovalNotifierProtocol
 from interlock.security.egress import build_safe_async_http_transport, validate_http_egress_url
 
 if TYPE_CHECKING:
+    from interlock.connections.fabric.runtime import FabricServices
+
+if TYPE_CHECKING:
     from interlock.cache.invalidation import CacheInvalidator
     from interlock.metadata.registry import MetadataRegistry
 
@@ -164,9 +167,11 @@ class ApprovalQueue:
         http_client: httpx.AsyncClient | None = None,
         cache_barrier_strict: bool = False,
         *,
+        fabric_services: FabricServices | None = None,
         notifier: ApprovalNotifierProtocol | None = None,
         expiry_sweep_interval_seconds: int = 30,
     ) -> None:
+        self._fabric_services = fabric_services
         self._pool = pg_pool
         self._conn_mgr = connection_manager
         self._expiry_seconds = expiry_seconds
@@ -376,7 +381,12 @@ class ApprovalQueue:
         self, row: asyncpg.Record, source: Any, source_type: str
     ) -> None:
         """Run the approved write through the source's own connector."""
-        adapter = get_adapter(source_type, getattr(source, "metadata", None) or {})
+        adapter = get_adapter(
+            source_type,
+            getattr(source, "metadata", None) or {},
+            fabric_services=self._fabric_services,
+            source_id=row["source_id"],
+        )
         execute_write = getattr(adapter, "execute_write", None)
         if execute_write is None:
             raise InterLockError(

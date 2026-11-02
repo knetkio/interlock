@@ -231,3 +231,11 @@ mutations. No other important planning questions were identified.
 User approval was received on 2026-11-02. The companion file-by-file implementation
 plan is `docs/superpowers/plans/2026-11-02-fabric-sql-connector.md`. The initial scope
 includes writes on capable endpoints and secret-based SPN authentication.
+
+### Implementation clarification: native Fabric identifiers
+
+Fabric authorization must preserve schema/table/column spelling. Existing SQL connectors retain their naming defaults. Fabric naming consumes catalog root facts `database`, `default_schema`, and `identifier_case_sensitive: bool | None`, plus native table/column names. The flag must come from verified database collation semantics, never `endpoint_type`. Unavailable naming metadata produces a clear catalog-required scope refusal; constants, source probes, and collector system queries remain possible.
+
+Resolve table scope to one catalog-native spelling before matching roles and policy. CS/BIN2 uses exact names. Initial CI support is proven ASCII case equivalence only; unsupported Unicode identifier equivalence, ambiguous names, and leading/trailing whitespace are refused. Unicode data values remain supported. Task 6 owns collecting actual collation/default schema, declaring supported semantics, preserving native catalog resource keys, and finishing enforcement. These are SQL-shape boundaries, not record review holds or exclusions. Authentication scope remains the saved-user OAuth/SPN design above.
+
+Initial Fabric adapter writes exclude T-SQL `OUTPUT` (including inserted/deleted columns). The existing governance path does not yet authorize returned columns as separate reads, so the dedicated validator refuses this shape before preflight, cache, approval execution, or driver submission. Ordinary INSERT/UPDATE/DELETE remain supported. Reusable transport OUTPUT rollback tests establish transport mechanics only and do not certify or advertise adapter OUTPUT support. Task 6 retains this refusal; separate read/column/redaction authorization is deferred.

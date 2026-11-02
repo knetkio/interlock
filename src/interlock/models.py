@@ -304,6 +304,7 @@ class PermissionRequest(BaseModel):
     # resource is the whole table; where column-level rules apply to one, the
     # request is refused rather than evaluated on a guess.
     column_gaps: dict[str, str] = Field(default_factory=dict)
+    resource_case_sensitive: bool = False
 
 
 class SourceRoleDecision(BaseModel):

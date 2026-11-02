@@ -20,7 +20,9 @@ from interlock.core.sql_governance import SqlNaming, naming_for
 
 logger = logging.getLogger(__name__)
 
-SQL_CONNECTOR_KEYS = frozenset({"postgresql", "postgres", "mysql", "mariadb", "snowflake"})
+SQL_CONNECTOR_KEYS = frozenset(
+    {"postgresql", "postgres", "mysql", "mariadb", "snowflake", "fabric_sql"}
+)
 
 _ROOT_SQL = """
 SELECT attributes FROM source_catalog
@@ -91,8 +93,9 @@ class CatalogNamingResolver:
         if root is None:
             return naming_for(connector_key, config)
         rows = await self._pool.fetch(_TABLES_SQL, source_id, sorted(TABLE_LIKE_NODE_TYPES))
+        normalize = str if connector_key == "fabric_sql" else lambda value: str(value).lower()
         known = frozenset(
-            (str(row["path"][-2]).lower(), str(row["path"][-1]).lower())
+            (normalize(row["path"][-2]), normalize(row["path"][-1]))
             for row in rows
             if len(row["path"]) >= 2
         )
@@ -100,8 +103,8 @@ class CatalogNamingResolver:
         for row in await self._pool.fetch(_COLUMNS_SQL, source_id):
             parent = row["parent_path"]
             if len(parent) >= 2:
-                key = (str(parent[-2]).lower(), str(parent[-1]).lower())
-                columns.setdefault(key, []).append(str(row["name"]).lower())
+                key = (normalize(parent[-2]), normalize(parent[-1]))
+                columns.setdefault(key, []).append(normalize(row["name"]))
         return naming_for(
             connector_key,
             config,
