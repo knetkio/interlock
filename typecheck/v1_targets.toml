@@ -65,6 +65,9 @@ paths = [
   "src/interlock/connections/connectors.py",
   "src/interlock/connections/manager.py",
   "src/interlock/connections/source_config.py",
+  "src/interlock/connections/fabric/__init__.py",
+  "src/interlock/connections/fabric/config.py",
+  "src/interlock/connections/fabric/credentials.py",
   "src/interlock/connections/activation.py",
   "src/interlock/connections/role_vocabulary.py",
 ]
@@ -76,6 +79,9 @@ strict_files = [
   "src/interlock/connections/adapters/s3.py",
   "src/interlock/connections/circuit_breaker.py",
   "src/interlock/connections/source_config.py",
+  "src/interlock/connections/fabric/__init__.py",
+  "src/interlock/connections/fabric/config.py",
+  "src/interlock/connections/fabric/credentials.py",
 ]
 
 [[areas]]

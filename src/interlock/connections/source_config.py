@@ -148,6 +148,19 @@ def validate_source_config(
     if not isinstance(cfg, dict):
         raise SourceConfigValidationError("connection_config must be an object")
 
+    if connector_key == "fabric_sql":
+        from pydantic import ValidationError
+
+        from interlock.connections.fabric.config import FabricConfig
+
+        try:
+            FabricConfig.from_mapping(cfg)
+        except ValidationError as exc:
+            # Do not echo values: rejected fields can contain literal secrets.
+            raise SourceConfigValidationError(
+                "invalid Fabric SQL connection configuration"
+            ) from exc
+
     allowed = _with_alias_siblings(
         {
             str(field)
