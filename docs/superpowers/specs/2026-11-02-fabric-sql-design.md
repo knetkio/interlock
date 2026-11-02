@@ -71,6 +71,10 @@ Require a database even where the service permits omission. Do not accept an
 arbitrary connection string, authentication authority, driver name, or fallback
 credential chain. Build connection strings from escaped validated fields.
 
+Use the green Microsoft Fabric “F” logo as the connector icon (user requirement),
+consistently in the connector picker, source listings, and source details. Reuse
+an existing suitable asset if available; otherwise use an official Fabric asset.
+
 Use one source form with endpoint type and authentication method selectors.
 OAuth offers Connect, connected-account/tenant display, Reconnect, and Disconnect.
 SPN accepts a tenant, application ID, and client-secret reference. Certificate-based
