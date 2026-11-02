@@ -30,7 +30,7 @@ from starlette.routing import Route
 
 from interlock import release_version
 from interlock.cache.provenance import redaction_of, with_redaction
-from interlock.connections.connectors import get_adapter
+from interlock.connections.connectors import connector_key_for, get_adapter
 from interlock.connections.fabric.runtime import FabricAuthenticatedSource
 from interlock.core.normalizer import (
     DEFAULT_DIALECT,
@@ -688,7 +688,11 @@ class MCPAdapter:
             if source_registry is not None
             else None
         )
-        saved_connector_key = getattr(saved_source, "connector_key", None)
+        saved_connector_key = (
+            connector_key_for(saved_source.source_type.value, saved_source.metadata)
+            if saved_source is not None
+            else None
+        )
         if (
             tool_name == "agentgate_query"
             and isinstance(sql, str)
@@ -989,7 +993,11 @@ class MCPAdapter:
 
         source_config = live_registry.get(source_id) if live_registry is not None else None
         fabric_source: FabricAuthenticatedSource | None = None
-        if source_config is not None and source_config.connector_key == "fabric_sql":
+        if (
+            source_config is not None
+            and connector_key_for(source_config.source_type.value, source_config.metadata)
+            == "fabric_sql"
+        ):
             try:
                 from interlock.connections.fabric.config import FabricConfig
 

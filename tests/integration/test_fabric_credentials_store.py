@@ -56,10 +56,10 @@ async def store_db(pg_pool, monkeypatch):
             migrations = Path(__file__).resolve().parents[2] / "migrations"
             first = await apply_migrations(conn, migrations, baseline_existing=False)
             second = await apply_migrations(conn, migrations, baseline_existing=False)
-            assert first.applied[-1] == "021_fabric_source_lifecycle.sql"
-            assert second.applied == [] and len(second.skipped) == 21
+            assert first.applied[-1] == "022_fabric_connector_resolution.sql"
+            assert second.applied == [] and len(second.skipped) == 22
         await pool.execute(
-            "INSERT INTO data_sources (source_id,name,source_type,connection_config) VALUES ('one','Fabric','database',$1)",
+            "INSERT INTO data_sources (source_id,name,source_type,connection_config,metadata) VALUES ('one','Fabric','database',$1,'{\"connector_key\":\"fabric_sql\"}'::jsonb)",
             json.dumps(BASE),
         )
         monkeypatch.setenv("FABRIC_STORE_KEY", Fernet.generate_key().decode())

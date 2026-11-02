@@ -174,7 +174,7 @@ async def test_delete_and_recreate_never_reuses_previous_identity_or_cache_names
     before = await services.prepare_source("one", FabricConfig.from_mapping(SPN))
     await pool.execute("DELETE FROM data_sources WHERE source_id='one'")
     await pool.execute(
-        "INSERT INTO data_sources (source_id,name,source_type,connection_config) VALUES ('one','New','database',$1)",
+        "INSERT INTO data_sources (source_id,name,source_type,connection_config,metadata) VALUES ('one','New','database',$1,'{\"connector_key\":\"fabric_sql\"}'::jsonb)",
         json.dumps(SPN),
     )
     after = await services.prepare_source("one", FabricConfig.from_mapping(SPN))
@@ -241,7 +241,7 @@ async def test_queued_approval_does_not_execute_with_replacement_principal(
     else:
         await pool.execute("DELETE FROM data_sources WHERE source_id='one'")
         await pool.execute(
-            "INSERT INTO data_sources (source_id,name,source_type,connection_config) VALUES ('one','New','database',$1)",
+            "INSERT INTO data_sources (source_id,name,source_type,connection_config,metadata) VALUES ('one','New','database',$1,'{\"connector_key\":\"fabric_sql\"}'::jsonb)",
             json.dumps(SPN),
         )
     with pytest.raises(InterLockError, match="identity changed"):
@@ -393,3 +393,206 @@ async def test_real_auth_replacement_bypasses_warmed_cache_under_new_generation(
     assert current.generation == before.generation + 1
     assert current.incarnation == before.incarnation
     assert current.account_id == ("replacement.tenant" if replacement == "oauth_account" else None)
+
+
+@pytest.mark.parametrize(
+    "before_metadata,after_metadata",
+    [
+        ({"connector_key": "fabric_sql"}, {}),
+        ({"connector_key": "FABRIC_SQL"}, {}),
+        ({"provider": "fabric_sql"}, {"provider": "mysql"}),
+        ({"connector_key": "fabric_sql", "provider": "mysql"}, {"provider": "mysql"}),
+        (
+            {"connector_key": "", "provider": "fabric_sql"},
+            {"connector_key": "", "provider": "mysql"},
+        ),
+    ],
+    ids=[
+        "key-removed",
+        "uppercase-key-removed",
+        "provider-replaced",
+        "key-removed-reveals-provider",
+        "empty-key-provider-replaced",
+    ],
+)
+async def test_connector_replacement_blocks_stale_gateways_with_retained_l1_and_l2(
+    store_db, monkeypatch, before_metadata, after_metadata
+):
+    store, pool, keys = store_db
+    await pool.execute(
+        "UPDATE data_sources SET connection_config=$1,metadata=$2 WHERE source_id='one'",
+        json.dumps(SPN),
+        json.dumps(before_metadata),
+    )
+    first, source = runtime(store, monkeypatch)
+    source.metadata = before_metadata
+    second, _ = runtime(FabricCredentialStore(pool, keys), monkeypatch)
+    first_provider = MagicMock(wraps=first.auth._acquire_sync)
+    second_provider = MagicMock(wraps=second.auth._acquire_sync)
+    monkeypatch.setattr(first.auth, "_acquire_sync", first_provider)
+    monkeypatch.setattr(second.auth, "_acquire_sync", second_provider)
+    client = redis.from_url(os.environ["TEST_REDIS_URL"])
+    l2 = L2Cache(client, key_prefix="fabric-connector-change:" + uuid.uuid4().hex + ":")
+    l1_first, l1_second = L1Cache(), L1Cache()
+    request1 = request_for(first, source, DeterministicFirstStrategy(l1_first, l2))
+    request2 = request_for(second, source, DeterministicFirstStrategy(l1_second, l2))
+    try:
+        assert (await query(request1)).status_code == 200
+        assert (await query(request2)).status_code == 200
+        current = await store.current_source("one")
+        old_key = next(iter(l1_first._cache))
+        assert (await l2.get(old_key)).hit and (await l1_second.get(old_key)).hit
+        provider_calls = (first_provider.call_count, second_provider.call_count)
+        # Both registries and all retained caches deliberately stay unchanged.
+        await pool.execute(
+            "UPDATE data_sources SET metadata=$1 WHERE source_id='one'", json.dumps(after_metadata)
+        )
+        row = await pool.fetchrow(
+            "SELECT generation,encrypted_cache FROM fabric_credentials WHERE source_id='one'"
+        )
+        assert (
+            row["generation"] == current.context.generation + 1 and row["encrypted_cache"] is None
+        )
+        with pytest.raises(FabricCredentialError):
+            await store.current_source("one")
+        with pytest.raises(FabricCredentialError):
+            await store.assert_current(current.context, current.config)
+        for request in (request1, request2):
+            response = await query(request)
+            assert response.status_code != 200 and b'"principal"' not in response.body
+        assert (first_provider.call_count, second_provider.call_count) == provider_calls
+        first.transport.execute.assert_awaited_once()
+        second.transport.execute.assert_not_awaited()
+        assert (await l1_first.get(old_key)).hit and (await l2.get(old_key)).hit
+    finally:
+        await l2.clear()
+        await client.aclose()
+
+
+@pytest.mark.parametrize(
+    "metadata,allowed",
+    [
+        ({}, False),
+        ({"provider": "mysql"}, False),
+        ({"provider": "fabric_sql"}, True),
+        ({"connector_key": "", "provider": "fabric_sql"}, True),
+        ({"connector_key": None, "provider": "fabric_sql"}, True),
+        ({"connector_key": "FABRIC_SQL", "provider": "mysql"}, True),
+        ({"connector_key": "fabric_sql", "provider": "mysql"}, True),
+        ({"connector_key": "mysql", "provider": "fabric_sql"}, False),
+    ],
+)
+async def test_authoritative_connector_resolution_matches_registry_precedence(
+    store_db, metadata, allowed
+):
+    from interlock.connections.connectors import connector_key_for
+
+    store, pool, _ = store_db
+    await pool.execute(
+        "UPDATE data_sources SET metadata=$1 WHERE source_id='one'", json.dumps(metadata)
+    )
+    assert (connector_key_for("database", metadata) == "fabric_sql") is allowed
+    if allowed:
+        current = await store.current_source("one")
+        assert current.config == FabricConfig.from_mapping(BASE)
+    else:
+        with pytest.raises(FabricCredentialError):
+            await store.current_source("one")
+        assert await pool.fetchval("SELECT count(*) FROM fabric_credentials") == 0
+
+
+async def test_ignored_provider_edit_does_not_revoke_explicit_fabric_connector(
+    store_db, monkeypatch
+):
+    store, pool, _ = store_db
+    await pool.execute(
+        "UPDATE data_sources SET connection_config=$1,metadata=$2 WHERE source_id='one'",
+        json.dumps(SPN),
+        json.dumps({"connector_key": "fabric_sql", "provider": "mysql"}),
+    )
+    services, _ = runtime(store, monkeypatch)
+    prepared = await services.prepare_source("one", FabricConfig.from_mapping(SPN))
+    await pool.execute(
+        "UPDATE data_sources SET metadata=$1 WHERE source_id='one'",
+        json.dumps({"connector_key": "fabric_sql", "provider": "postgresql"}),
+    )
+    await store.assert_current(prepared.token.context, prepared.config)
+    assert (await store.get_context("one")).generation == prepared.token.context.generation
+
+
+@pytest.mark.parametrize("metadata", [{"connector_key": "FABRIC_SQL"}, {"provider": "fabric_sql"}])
+async def test_alias_fabric_approval_preserves_original_principal_check(
+    store_db, monkeypatch, metadata
+):
+    store, pool, _ = store_db
+    await pool.execute(
+        "UPDATE data_sources SET connection_config=$1,metadata=$2 WHERE source_id='one'",
+        json.dumps(SPN),
+        json.dumps(metadata),
+    )
+    services, source = runtime(store, monkeypatch)
+    source.metadata = metadata
+    prepared = await services.prepare_source("one", FabricConfig.from_mapping(SPN))
+    row = dict(
+        id=1,
+        source_id="one",
+        identity_id=2,
+        sql_text="DELETE FROM dbo.Users WHERE id=?",
+        request_metadata={"upstream_identity": prepared.upstream_identity, "parameters": [1]},
+    )
+    queue = ApprovalQueue(
+        pool, registry=SimpleNamespace(get=lambda _: source), fabric_services=services
+    )
+    await queue._execute_sql(row, row["request_metadata"])
+    services.transport.execute.assert_awaited_once()
+    await store.invalidate("one", reason="rotation", delete_cache=True)
+    with pytest.raises(InterLockError, match="identity changed"):
+        await queue._execute_sql(row, row["request_metadata"])
+    services.transport.execute.assert_awaited_once()
+
+
+@pytest.mark.parametrize("empty_marker", [None, "", False, 0, [], {}])
+async def test_provider_fallback_changes_revoke_for_python_empty_marker_values(
+    store_db, monkeypatch, empty_marker
+):
+    store, pool, _ = store_db
+    before_metadata = {"connector_key": empty_marker, "provider": "fabric_sql"}
+    await pool.execute(
+        "UPDATE data_sources SET connection_config=$1,metadata=$2 WHERE source_id='one'",
+        json.dumps(SPN),
+        json.dumps(before_metadata),
+    )
+    services, _ = runtime(store, monkeypatch)
+    prepared = await services.prepare_source("one", FabricConfig.from_mapping(SPN))
+    await pool.execute(
+        "UPDATE data_sources SET metadata=$1 WHERE source_id='one'",
+        json.dumps({"connector_key": empty_marker, "provider": "mysql"}),
+    )
+    assert (
+        await pool.fetchval("SELECT generation FROM fabric_credentials WHERE source_id='one'")
+        == prepared.token.context.generation + 1
+    )
+    with pytest.raises(FabricCredentialError):
+        await store.assert_current(prepared.token.context, prepared.config)
+
+
+async def test_standalone_disconnect_still_revokes_disabled_unreadable_credentials(
+    store_db, monkeypatch
+):
+    store, pool, _ = store_db
+    await pool.execute(
+        "UPDATE data_sources SET connection_config=$1 WHERE source_id='one'", json.dumps(SPN)
+    )
+    services, _ = runtime(store, monkeypatch)
+    prepared = await services.prepare_source("one", FabricConfig.from_mapping(SPN))
+    await pool.execute("UPDATE data_sources SET enabled=FALSE WHERE source_id='one'")
+    await pool.execute(
+        "UPDATE fabric_credentials SET encrypted_cache=$1 WHERE source_id='one'", b"unreadable"
+    )
+    disconnected = await store.invalidate("one", reason="disconnect", delete_cache=True)
+    assert disconnected.generation == prepared.token.context.generation + 2
+    assert disconnected.status == "disconnected"
+    assert (
+        await pool.fetchval("SELECT encrypted_cache FROM fabric_credentials WHERE source_id='one'")
+        is None
+    )

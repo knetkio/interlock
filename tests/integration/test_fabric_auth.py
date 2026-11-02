@@ -249,7 +249,7 @@ async def test_consumed_callback_cannot_attach_to_recreated_source_with_same_gen
         flow = await original(*args)
         await pool.execute("DELETE FROM data_sources WHERE source_id='one'")
         await pool.execute(
-            "INSERT INTO data_sources (source_id,name,source_type,connection_config) VALUES ('one','Replacement','database',$1)",
+            "INSERT INTO data_sources (source_id,name,source_type,connection_config,metadata) VALUES ('one','Replacement','database',$1,'{\"connector_key\":\"fabric_sql\"}'::jsonb)",
             json.dumps(BASE),
         )
         return flow
@@ -273,7 +273,7 @@ async def test_oauth_start_cannot_save_old_flow_into_recreated_source(
     async def recreate_then_save(*args, **kwargs):
         await pool.execute("DELETE FROM data_sources WHERE source_id='one'")
         await pool.execute(
-            "INSERT INTO data_sources (source_id,name,source_type,connection_config) VALUES ('one','Replacement','database',$1)",
+            "INSERT INTO data_sources (source_id,name,source_type,connection_config,metadata) VALUES ('one','Replacement','database',$1,'{\"connector_key\":\"fabric_sql\"}'::jsonb)",
             json.dumps(BASE),
         )
         return await original(*args, **kwargs)

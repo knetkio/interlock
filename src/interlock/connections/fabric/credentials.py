@@ -146,9 +146,11 @@ class FabricCredentialStore:
                     metadata = source["metadata"] or {}
                     if isinstance(metadata, str):
                         metadata = json.loads(metadata)
+                    from interlock.connections.connectors import connector_key_for
+
                     if (
                         source["source_type"] not in ("database", "fabric_sql")
-                        or metadata.get("connector_key", "fabric_sql") != "fabric_sql"
+                        or connector_key_for(source["source_type"], metadata) != "fabric_sql"
                     ):
                         raise FabricCredentialError("Fabric source configuration changed")
                     config = source["connection_config"]

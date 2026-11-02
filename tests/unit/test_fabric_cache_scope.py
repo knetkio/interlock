@@ -228,8 +228,17 @@ async def test_prepared_token_expiring_during_cache_lookup_is_not_delivered(monk
     transport.execute.assert_awaited_once()
 
 
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"connector_key": "fabric_sql"},
+        {"connector_key": "FABRIC_SQL"},
+        {"provider": "fabric_sql"},
+    ],
+)
 def test_denied_mcp_request_never_acquires_provider_token_and_queue_metadata_has_original_binding(
     monkeypatch,
+    metadata,
 ):
     from dataclasses import asdict
 
@@ -245,7 +254,7 @@ def test_denied_mcp_request_never_acquires_provider_token_and_queue_metadata_has
         name="Fabric",
         source_type=DataSourceType.DATABASE,
         connection_config=CONFIG,
-        metadata={"connector_key": "fabric_sql"},
+        metadata=metadata,
     )
     registry = SimpleNamespace(get=lambda _: source)
     captured = []
@@ -270,6 +279,7 @@ def test_denied_mcp_request_never_acquires_provider_token_and_queue_metadata_has
             },
         )
     assert response.status_code == 401
+    assert captured[0].metadata["connector_key"] == "fabric_sql"
     assert captured[0].metadata["upstream_identity"] == asdict(
         services.auth.acquire.return_value.context
     )
