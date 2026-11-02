@@ -340,3 +340,65 @@ async def test_actor_revoked_during_token_acquisition_is_rechecked_before_sql(ac
     with pytest.raises(InterLockError):
         await queue.approve(approval_id, "reviewer")
     services.transport.execute.assert_not_awaited()
+
+
+async def test_native_case_role_and_policy_create_read_routes_preserve_stored_spelling(acceptance):
+    from httpx import ASGITransport, AsyncClient
+
+    from tests.unit.test_source_role_editor import _make_app
+
+    _, _, _, pool, _, _ = acceptance
+    async with AsyncClient(
+        transport=ASGITransport(app=_make_app(pool)), base_url="http://test"
+    ) as client:
+        created_role = await client.post(
+            "/dashboard/data-sources/one/roles",
+            data={
+                "role_key": "case_reader",
+                "name": "Native case reader",
+                "enabled": "on",
+                "permission_effect": ["allow", "deny"],
+                "permission_action": ["db.table.select", "db.table.select"],
+                "permission_resource_type": ["db.column", "db.column"],
+                "permission_resource_pattern": ["Sales.People.Name", "Sales.People.name"],
+                "permission_constraints": ["{}", "{}"],
+            },
+        )
+        assert created_role.status_code == 303, created_role.text
+        role_id = await pool.fetchval(
+            "SELECT id FROM source_roles WHERE source_id='one' AND role_key='case_reader'"
+        )
+        stored = await pool.fetch(
+            "SELECT resource_pattern FROM source_role_permissions WHERE role_id=$1 ORDER BY id",
+            role_id,
+        )
+        assert [row["resource_pattern"] for row in stored] == [
+            "Sales.People.Name",
+            "Sales.People.name",
+        ]
+        read_role = await client.get(f"/dashboard/data-sources/one/roles/{role_id}/edit")
+        assert read_role.status_code == 200
+        assert 'value="Sales.People.Name"' in read_role.text
+        assert 'value="Sales.People.name"' in read_role.text
+
+        policy = {
+            "name": "Native case policy",
+            "conditions": {
+                "source_id": "one",
+                "tables": ["Sales.People", "sales.people"],
+                "columns": ["Name", "name"],
+            },
+            "actions": {"effect": "allow", "redact_columns": ["Name", "name"]},
+        }
+        created_policy = await client.post("/api/policies", json=policy)
+        assert created_policy.status_code == 201, created_policy.text
+        policy_id = created_policy.json()["id"]
+        stored_policy = await pool.fetchrow(
+            "SELECT conditions,actions FROM policy_rules WHERE id=$1", policy_id
+        )
+        read_policy = await client.get(f"/api/policies/{policy_id}")
+        assert read_policy.status_code == 200
+        for key in ("conditions", "actions"):
+            assert stored_policy[key] == policy[key]
+            assert created_policy.json()[key] == policy[key]
+            assert read_policy.json()[key] == policy[key]

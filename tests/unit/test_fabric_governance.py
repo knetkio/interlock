@@ -68,6 +68,150 @@ async def run_query(request, adapter, args):
     return await adapter._execute_query(request, args)
 
 
+async def call_query(request, adapter, sql):
+    """Real MCP ingress, preflight and result/cache delivery with a saved actor."""
+    from starlette.requests import Request
+
+    state = request.app.state
+    state.auth_manager = SimpleNamespace(
+        authenticate=AsyncMock(return_value=request.state.identity)
+    )
+    body = json.dumps(
+        {"name": "agentgate_query", "arguments": {"source_id": "saved", "sql": sql}}
+    ).encode()
+
+    async def receive():
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    incoming = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/mcp/tools/call",
+            "headers": [(b"authorization", b"Bearer test-only-agent")],
+            "app": request.app,
+            "state": {},
+        },
+        receive,
+    )
+    return await adapter.call_tool(incoming)
+
+
+def named_redaction_origin():
+    parts = governed(
+        statements=[stmt(permission_id=1, resource_pattern="dbo.people.*")],
+        rules=[_rule(actions={"effect": "allow", "redact_columns": ["ssn"]})],
+    )
+    request = parts[-2]
+    request.app.state.sql_naming_resolver.naming_for_source.return_value = replace(
+        naming(True),
+        known_tables=frozenset({("dbo", "people")}),
+        columns={("dbo", "people"): ("category", "ssn")},
+        relation_types={("dbo", "people"): "table"},
+    )
+    return parts
+
+
+@pytest.mark.asyncio
+async def test_named_redaction_refuses_pivot_without_lineage_before_origin_or_cache():
+    _, _, transport, cache, _, request, adapter = named_redaction_origin()
+    sql = (
+        "SELECT p.[x] AS exposed FROM (SELECT category, ssn FROM dbo.people) s "
+        "PIVOT (MAX(ssn) FOR category IN ([x])) p"
+    )
+    transport.execute.return_value = {
+        "rows": [{"exposed": "private-pivot-value"}],
+        "columns": ["exposed"],
+    }
+    responses = [await call_query(request, adapter, sql) for _ in range(2)]
+    assert all(response.status_code == 400 for response in responses)
+    assert all(b"private-pivot-value" not in response.body for response in responses)
+    transport.execute.assert_not_awaited()
+    assert not cache.entries and not cache.lookups
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT p.exposed FROM (SELECT category, ssn FROM dbo.people) s "
+        "UNPIVOT (exposed FOR field IN (ssn)) p",
+        "SELECT p.exposed FROM dbo.people UNPIVOT (exposed FOR field IN (ssn)) p",
+    ],
+)
+async def test_unpivot_empty_source_lineage_cannot_recover_named_redaction(sql):
+    _, _, transport, cache, _, request, adapter = named_redaction_origin()
+    transport.execute.return_value = {
+        "rows": [{"exposed": "private-unpivot-value"}],
+        "columns": ["exposed"],
+    }
+    for _ in range(2):
+        response = await call_query(request, adapter, sql)
+        assert response.status_code == 400
+        assert b"private-unpivot-value" not in response.body
+    transport.execute.assert_not_awaited()
+    assert not cache.entries and not cache.lookups
+
+
+@pytest.mark.asyncio
+async def test_preflight_requires_lineage_for_named_redaction_even_with_whole_table_grant():
+    _, _, transport, cache, _, request, adapter = named_redaction_origin()
+    response = await run_query(
+        request,
+        adapter,
+        {
+            "source_id": "saved",
+            "sql": "SELECT p.[x] AS exposed FROM "
+            "(SELECT category, ssn FROM dbo.people) s PIVOT (MAX(ssn) FOR category IN ([x])) p",
+        },
+    )
+    assert response.status_code == 403 and b"lineage" in response.body
+    transport.execute.assert_not_awaited()
+    assert not cache.entries and not cache.lookups
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("apply", ["CROSS", "OUTER"])
+async def test_unmapped_apply_origin_is_refused_before_governance_cache_and_origin(apply):
+    _, _, transport, cache, _, request, adapter = named_redaction_origin()
+    response = await call_query(
+        request,
+        adapter,
+        f"SELECT x.exposed FROM dbo.people p {apply} APPLY (SELECT p.ssn AS exposed) x",
+    )
+    assert response.status_code == 400
+    transport.execute.assert_not_awaited()
+    assert not cache.entries and not cache.lookups
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "sql,output,wanted",
+    [
+        ("SELECT 1 AS safe", "safe", "public"),
+        ("SELECT 1 AS safe FROM dbo.people", "safe", "public"),
+        ("SELECT COUNT(*) AS n FROM dbo.people", "n", "public"),
+        ("SELECT ssn AS exposed FROM dbo.people", "exposed", "[REDACTED:POLICY]"),
+    ],
+)
+async def test_named_redaction_keeps_constants_counts_and_simple_aliases_cacheable(
+    sql, output, wanted
+):
+    _, _, transport, cache, _, request, adapter = named_redaction_origin()
+    if sql == "SELECT 1 AS safe":
+        # A table-free read asks for the source-wide SELECT resource.
+        request.app.state.source_role_evaluator = SourceRoleEvaluator(
+            FakePool([stmt(permission_id=1, resource_pattern="*")])
+        )
+    transport.execute.return_value = {"rows": [{output: "public"}], "columns": [output]}
+    for _ in range(2):
+        response = await call_query(request, adapter, sql)
+        assert response.status_code == 200
+        assert json.loads(json.loads(response.body)["content"][0]["text"]) == [{output: wanted}]
+    assert cache.entries
+    transport.execute.assert_awaited_once()
+
+
 @pytest.mark.asyncio
 async def test_stale_star_cannot_return_or_cache_new_sensitive_column():
     _, _, transport, cache, _, request, adapter = governed(

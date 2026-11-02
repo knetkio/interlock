@@ -333,6 +333,34 @@ class GatewayPipeline:
         else:
             policy_decision = None
 
+        if (
+            "fabric_identifier_case_sensitive" in governance_metadata
+            and governance_operation == "read"
+            and request.sql
+            and policy_decision is not None
+            and policy_decision.redact_columns
+            and (view.permission_request.column_gaps or not view.column_lineage)
+        ):
+            # A whole-table grant can accept unresolved columns, but cannot
+            # establish that aliased output is safe under named redaction.
+            # Constants and COUNT have resolved outputs with empty source sets.
+            return GatewayDecision(
+                allowed=False,
+                status_code=403,
+                reason="Fabric policy redaction requires resolved output column lineage",
+                identity=identity,
+                policy_decision=policy_decision,
+                rate_limit_result=rate_result,
+                source_role_decision=source_role_decision,
+                audit_metadata=_governance_metadata(
+                    source_role_decision=source_role_decision,
+                    permission_request=view.permission_request,
+                    policy_decision=policy_decision,
+                    identity=identity,
+                    source_id=request.source_id,
+                ),
+            )
+
         if identity is not None and self._rate_limiter is not None:
             rate_result = await self._check_rate_limit(
                 identity,

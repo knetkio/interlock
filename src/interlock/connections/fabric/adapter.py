@@ -52,6 +52,10 @@ class FabricSQLAdapter(BaseConnectorAdapter):
         ):
             raise ValueError("Fabric supports one SELECT, INSERT, UPDATE, or DELETE statement")
         statement = statements[0]
+        if statement.find(exp.Pivot) is not None:
+            # sqlglot can accept PIVOT/UNPIVOT while losing output origins,
+            # including an empty source set that resembles a safe constant.
+            raise ValueError("Fabric PIVOT/UNPIVOT output column scope is unsupported")
         if any(select.args.get("for_") for select in statement.find_all(exp.Select)):
             raise ValueError("Fabric structured FOR XML/JSON results have unsupported column scope")
         wildcard_selects = [

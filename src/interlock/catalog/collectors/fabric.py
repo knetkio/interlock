@@ -23,6 +23,7 @@ _CI_COLLATIONS = frozenset(
         "Latin1_General_100_CI_AS",
         "Latin1_General_100_CI_AS_SC",
         "Latin1_General_100_CI_AS_SC_UTF8",
+        "Latin1_General_100_CI_AS_KS_WS_SC_UTF8",
         "SQL_Latin1_General_CP1_CI_AS",
     }
 )

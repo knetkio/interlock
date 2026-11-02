@@ -156,6 +156,8 @@ async def test_empty_metadata_is_complete_but_permission_failure_is_not_empty_su
     "catalog_collation,ascii_case_equivalent,expected",
     [
         ("Latin1_General_100_CI_AS_SC_UTF8", 1, False),
+        ("Latin1_General_100_CI_AS_KS_WS_SC_UTF8", 1, False),
+        ("Latin1_General_100_CI_AS_KS_WS_SC_UTF8", 0, None),
         ("Latin1_General_100_CS_AS", 0, True),
         ("Turkish_CI_AS", 1, None),
         ("unknown", 0, None),
