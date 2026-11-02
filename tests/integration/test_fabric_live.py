@@ -1,4 +1,4 @@
-"""Opt-in six-cell native read/catalog acceptance, no customer fixtures or writes.
+"""Opt-in six-cell native acceptance using explicitly authorized operator fixtures.
 
 FABRIC_LIVE=1 FABRIC_LIVE_MANIFEST=/private/manifest.json uv run pytest \\
   tests/integration/test_fabric_live.py -m live -q -rA
@@ -67,7 +67,7 @@ async def native_cell(request):
         ), "Configure explicit Fabric key references and native dependencies"
         current = await services.store.current_source(cell.source_id)
         validate_binding(cell, current.config, current.context)
-        yield cell, current.config, services
+        yield cell, current.config, services, pool
     finally:
         if services:
             await services.close()
@@ -82,7 +82,7 @@ async def native_cell(request):
 )
 @pytest.mark.parametrize("dimension", DIMENSIONS)
 async def test_fabric_native_acceptance(native_cell, dimension, record_property):
-    cell, config, services = native_cell
+    cell, config, services, pool = native_cell
     record_property("workspace_designation", cell.workspace_id)
     record_property("workspace_verification", "operator-designated; not independently queried")
     if dimension in {"connection", "bounded_select", "token_packing"}:
@@ -124,14 +124,39 @@ async def test_fabric_native_acceptance(native_cell, dimension, record_property)
                 }
             )
     else:
-        pytest.skip(
-            "PENDING: designated operator scenario/evidence required; no certification claim"
-        )
+        if dimension == "lakehouse_mutation_rejection":
+            pytest.skip("Not applicable: table writes are supported by this endpoint type")
+        scenario = configured_scenario(cell, dimension)
+        from tests.integration.fabric_live_scenarios import run_scenario
+
+        await run_scenario(dimension, scenario, cell, config, services, pool)
 
 
-@pytest.mark.parametrize("endpoint_type", ENDPOINTS)
-@pytest.mark.parametrize("auth_mode", AUTH_MODES)
-def test_fabric_live_write_acceptance_requires_disposable_object_authorization(
-    endpoint_type, auth_mode
-):
-    pytest.skip("PENDING: explicit disposable-object write authorization and fixtures required")
+def configured_scenario(cell, dimension):
+    from tests.integration.fabric_live_scenarios import load_scenarios
+
+    path = os.environ.get("FABRIC_LIVE_SCENARIOS")
+    if not path:
+        pytest.skip("UNVERIFIED: no authorized scenario fixtures supplied")
+    assert Path(path).is_absolute(), "Private scenario file must use an absolute path"
+    book = load_scenarios(json.loads(Path(path).read_text()))
+    scenario = book.cells.get(f"{cell.endpoint_type}/{cell.auth_mode}", {}).get(dimension)
+    if scenario is None:
+        pytest.skip("UNVERIFIED: this authorized scenario fixture was not supplied")
+    return scenario
+
+
+@pytest.mark.parametrize(
+    "native_cell",
+    [(e, a) for e in ENDPOINTS for a in AUTH_MODES],
+    indirect=True,
+    ids=[f"{e}-{a}" for e in ENDPOINTS for a in AUTH_MODES],
+)
+async def test_fabric_live_disposable_write_acceptance(native_cell):
+    cell, config, services, pool = native_cell
+    if cell.endpoint_type == "lakehouse_sql":
+        pytest.skip("Not applicable: Lakehouse mutation rejection has a separate read-only probe")
+    scenario = configured_scenario(cell, "writes")
+    from tests.integration.fabric_live_scenarios import run_scenario
+
+    await run_scenario("writes", scenario, cell, config, services, pool)

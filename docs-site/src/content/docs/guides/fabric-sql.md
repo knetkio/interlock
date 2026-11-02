@@ -202,13 +202,86 @@ FABRIC_LIVE=1 FABRIC_LIVE_MANIFEST=/private/fabric-manifest.json \
 
 Missing cells skip as **unverified**. Runnable probes verify connection/token
 packing, a bounded read with DB/principal assertions, catalog visibility, and
-Lakehouse adapter rejection without sending destructive SQL. Separate pending
-cells list denial, redaction, audit, restart/refresh, reconnect/lost consent,
-SPN rotation, multi-instance cache lifecycle, login/statement cancellation,
-TLS certificate failures and redirect egress. They require designated authorized
-actor/role/policy/object fixtures and operator scenarios; this harness does not
-invent grants or mark those scenarios passed. Write acceptance remains pending
-until disposable objects are explicitly authorized.
+Lakehouse adapter rejection without sending destructive SQL. The remaining dimensions use explicitly supplied operator scenarios described
+below. All native results remain pending until those authorized fixtures are
+supplied and actually executed. This harness never invents grants, policies,
+credentials or disposable objects.
+
+### Executable operator scenarios
+
+Set `FABRIC_LIVE_SCENARIOS=/private/fabric-scenarios.json` alongside the manifest
+and control settings. The file maps endpoint/auth cells to scenarios and pins
+the exact allowed gateway origins; HTTP redirects are refused. For example:
+
+```json
+{
+  "allowed_gateway_origins": ["https://gateway.test.example"],
+  "cells": {
+    "warehouse/spn": {
+      "audit": {
+        "probe": {
+          "gateway_url": "https://gateway.test.example",
+          "actor_key_ref": "file:///run/secrets/fabric-test-actor",
+          "actor_id": 7,
+          "sql": "SELECT Name FROM dbo.AcceptanceFixture",
+          "expected_rows": [{"Name": "authorized-fixture"}]
+        }
+      }
+    }
+  }
+}
+```
+
+Use an existing authorized downstream identity, role/policy and harmless fixture.
+`probe.parameters` is an optional ordered array. General probes must be read-only.
+Every governed observation checks a new audit event bound to source, actor and
+its unique request correlation ID; old or unrelated traffic is insufficient.
+
+| Scenario key | Required fixture/actions and independent assertions |
+| --- | --- |
+| `denial` | `probe` must receive 403 and a new correlated denied audit event. |
+| `redaction` | `probe`, nonempty `masked_columns`; all designated returned columns must equal `[REDACTED:POLICY]`, with a new success audit. |
+| `audit` | Exact expected fixture rows and new source/actor success audit. |
+| `restart_refresh` | `probe`, `restart` and `refresh` hooks, `restart_observer_path`; fresh observed process identity change, unchanged credential identity/generation, later token expiry, successful governed read/audit. Arrange genuine renewal conditions beforehand; a hook exit alone cannot prove restart or renewal. |
+| `oauth_reconnect_lost_consent` | `probe`, `lose_consent` and `reconnect` hooks; acquisition must require reconnect after loss, then a newer generation and correct SQL identity after user-operated reconnect. |
+| `spn_rotation` | `probe`, `rotate` hook; newer generation, old prepared capability refused, correct new-generation read/audit. |
+| `multi_instance_cache` | `probe`, distinct allowed `second_gateway_url`, `reset_cache`/`invalidate` hooks; first miss/second-instance hit before and after generation invalidation, with matching new identity audits. |
+| `statement_cancellation` | An empty scenario object opts into the existing native worker/handle/server-request probe; also requires `FABRIC_SQL_OBSERVE_SESSION_AUTHORIZED=1`. |
+| `login_cancellation` | `prepare`/`cleanup` hooks and `network` fixture; positive login-start event, actual cancellation, original native worker completion and observed login closure. |
+| `tls_certificate_failure` | `prepare`/`cleanup` hooks and `network` fixture; actual driver rejection plus observed certificate rejection. No TLS verification override is available. |
+| `driver_redirect_egress` | `prepare`/`cleanup` hooks and `network` fixture; actual driver rejection, positive allowed initial destination and blocked disallowed redirect; any allowed disallowed destination fails as a bypass. |
+| `writes` | `probe`, `write.authorization: "disposable_objects_only"`, designated `write.table`, exactly three `write.steps` (INSERT VALUES, UPDATE, DELETE). Each step supplies SQL, optional ordered parameters, same-table `read_sql`, and exact `expected_rows`. Existing policy/role/approval remains enforced. A 202 requires an explicit `approve` hook and an executed queue record; new write audit and read-back must both match. Lakehouse writes are excluded. |
+
+`hooks` maps the named action to an object with `argv` (absolute executable and
+explicit nonsecret arguments), optional `timeout_seconds` (1–60), and optional
+`secret_env` mapping variable names to secret references. Hooks run with
+`shell=False`, suppressed stdout/stderr and no ambient credential environment.
+The harness supplies `FABRIC_ACCEPTANCE_SOURCE_ID`, `FABRIC_ACCEPTANCE_NONCE`, and
+for approval `FABRIC_ACCEPTANCE_APPROVAL_ID`. Sensitive values/references never
+belong in argv. User-operated OAuth login must use the approved console flow;
+prepare any longer interactive action before a bounded hook verifies completion.
+Hooks must only operate the explicitly authorized fixtures, with no automatic
+grants or policy creation. The harness provides no generic recorded-pass field.
+
+The `network` object supplies absolute `observer_path`, exact
+`allowed_destination` (for example `sql.example:1433`), a different
+`blocked_destination` for redirect tests, and optional `cleanup_seconds` (1–60).
+Prepare the observation fixture against the saved source's **exact host**; the
+harness does not change its host, identity, TLS settings or permissions. A trusted
+external observer appends JSONL events with `nonce`, `source_id`, `target_host`,
+`destination`, `timestamp` (UTC epoch seconds), `action` (`allowed` or `blocked`)
+and `event`. Only fresh records appended after the attempt began are accepted.
+Required events include `login_started`/`login_closed`,
+`tls_certificate_rejected`, or `redirect` as applicable. Restart observation uses
+fresh JSONL `event: "process_restart"`, matching nonce/source/`gateway_origin`,
+`timestamp`, and different nonempty `previous_instance`/`current_instance` IDs.
+
+These observers must be trusted telemetry from actual fixture/process/network
+controls, independent of hook exit status. An arbitrary file's authenticity cannot
+be independently proven by this harness. Passing only establishes the observed
+fixture behavior; release still requires trusted actual deployment egress evidence.
+Missing cell/scenario/permission skips remain **unverified**, and failed assertions
+are failures. Offline synthetic boundary tests never count as native certification.
 
 The optional `test_sqlserver_transport.py` probes use the same manifest and saved
 identity (`FABRIC_SQL_INTEGRATION=1`). Only explicit

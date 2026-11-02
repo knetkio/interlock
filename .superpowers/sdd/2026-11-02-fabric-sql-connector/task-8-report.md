@@ -305,3 +305,100 @@ Changed files are enumerated below.
 - `tools/check_fabric_image.py`
 - `tools/docs/generate.py`
 - `.superpowers/sdd/2026-11-02-fabric-sql-connector/task-8-report.md`
+
+## Review fix round 1 — executable opt-in operator scenarios
+
+Review base: `fe6de64`; addresses the Important finding in `task-8-review.md`
+that absent fixtures and unconditional skip-only tooling are different gaps.
+The initial pending inventory did not implement these scenarios. This section
+supersedes that initial tooling limitation; **native results remain unverified**.
+
+With controller approval, added a single test-only scenario module and private
+`FABRIC_LIVE_SCENARIOS` interface. No production code, dependency, image, grants,
+policies, customer data, login or live endpoint was changed/accessed. No image
+rebuild or full-suite repetition was needed for this tooling/docs-only fix.
+
+- Scenarios pin exact allowed gateway origins, designated actor secret reference/
+  actor ID and harmless read fixtures. HTTP redirects are refused. New audit
+  events must match source, actor, operation/status and the unique request
+  correlation ID (or actual approval ID for an approved write).
+- Denial checks actual 403/new denied audit; redaction checks actual policy-mask
+  output/new success audit; audit checks actual expected rows/new success event.
+- Lifecycle hooks have bounded explicit argv (`shell=False`, 1–60 second deadline,
+  suppressed output, only explicitly referenced secrets in their environment;
+  no inherited ambient credential variables). Exit zero alone cannot pass a
+  scenario. Restart additionally requires fresh trusted process-identity-change
+  observation; refresh requires later token expiry with unchanged credential
+  identity/generation. Reconnect and SPN rotation require advanced generation,
+  refusal of the old prepared capability, actual SQL database/principal match,
+  successful governed read and matching new-generation audit. Consent loss must
+  actually require reconnect before the operator reconnect step is accepted.
+- Two-instance cache scenario checks first miss/other-instance hit, invalidation,
+  advanced generation and old-capability refusal, followed by the same cache
+  pattern with new identity audits. It uses existing deployed gateways and state.
+- Login cancellation, TLS certificate failure and redirect scenarios use actual
+  transport attempts against the saved source's unchanged exact host/TLS/identity.
+  A trusted observer must supply fresh appended events bound to unique nonce,
+  source, target, destination, timestamp and action. Positive allowed connection
+  evidence is mandatory; TLS rejection/login start+closure/blocked redirect are
+  independently required, as applicable. Any observed allowed disallowed redirect
+  fails as a bypass. Login cancellation also waits for the original native worker.
+  Statement cancellation delegates to the existing native handle/worker/server
+  request probe with its explicit server-observation authorization.
+- Explicit disposable write authorization scopes exactly INSERT VALUES, UPDATE,
+  DELETE and each read-back to the designated table. Actual governed MCP calls
+  preserve policy/roles/approval. A 202 requires an explicit operator approval hook,
+  an executed queue record, a new successful write audit, and exact read-back.
+  No fixtures/grants are created by this runner and no uncertain write is retried.
+- Missing cells/scenarios/required permissions remain skipped/unverified. Supplied
+  suitable scenarios can now execute rather than unconditionally skipping. The
+  guide documents required fields/hooks/observer events for every original review
+  dimension. An arbitrary observer file's authenticity cannot be independently
+  proven: actual trusted deployment/network observation remains an operator-owned
+  release requirement. Redirect bypass remains a release blocker.
+
+TDD RED command:
+
+```sh
+uv run pytest tests/unit/test_fabric_live_scenarios.py -q
+```
+
+Result before implementation: **6 failed**, each explicitly asserting the missing
+scenario module, before imports/implementation (`fixround1-red.log`). Initial
+GREEN: **6 passed** (`fixround1-green-initial.log`). Expanded synthetic tests cover
+correlated audit, unmasked-output refusal, noop-rotation refusal, all three actual
+HTTP-boundary write parameter/read-back transitions, and a real subprocess
+approval hook that must execute before queue/read-back acceptance. Synthetic HTTP
+and control-boundary doubles test the tooling only; they are not native evidence.
+
+Final focused command:
+
+```sh
+PATH=/Users/avouk/.local/share/mise/installs/helm/3.19.2/darwin-arm64:$PATH \
+  uv run pytest tests/unit/test_fabric_live_scenarios.py \
+  tests/unit/test_fabric_live_manifest.py tests/unit/test_fabric_packaging.py \
+  tests/unit/test_docs_site.py tests/integration/test_fabric_live.py \
+  tests/integration/test_sqlserver_transport.py -q
+```
+
+Result: **402 passed, 106 skipped**, 2.13s (`fixround1-focused-final.log`). All 106
+native skips remain unverified. No native scenario ran and no certification was
+added. `make lint`: exit 0, ruff/black clean, **480 files unchanged**
+(`fixround1-lint.log`). `uv run python tools/docs/generate.py --check`: exit 0
+(`fixround1-docs-check.log`). `git diff --check`: exit 0. Evidence remains in
+`build/fabric-task8-evidence/`, outside SDD cleanup.
+
+Files in this fix:
+
+- `tests/integration/fabric_live_scenarios.py` (new scoped schema/helpers/runner)
+- `tests/unit/test_fabric_live_scenarios.py` (new synthetic tooling tests)
+- `tests/integration/test_fabric_live.py` (dispatch supplied scenarios/write fixtures)
+- `tests/integration/test_sqlserver_transport.py` (updated shared fixture tuple)
+- `docs-site/src/content/docs/guides/fabric-sql.md` (operator interface/limits)
+- This report (review correction and exact evidence)
+
+Self-review: checked that hooks cannot supply a recorded pass flag, observations
+are fresh/correlated, writes remain explicitly scoped/governed, failure does not
+retry writes, and no source/TLS/permission fallback was introduced. Remaining
+concerns are the still-unsupplied six native cells, trusted observer provenance,
+and actual deployment egress/lifecycle evidence, not unconditional skip tooling.

@@ -42,7 +42,7 @@ pytestmark = [
 
 @pytest.fixture
 async def endpoint(native_cell):
-    cell, config, services = native_cell
+    cell, config, services, _ = native_cell
     source = await services.prepare_source(cell.source_id, config)
     driver = pytest.importorskip("pyodbc")
     return cell, config, source.token, driver
